@@ -1,0 +1,73 @@
+[project]
+name = "bordeus-ingest"
+version = "0.1.0"
+description = "Pipeline di ingestion RAG per bordeus: HTML+PDF+Markdown -> chunk (LangChain) -> embedding (HF) -> Postgres/pgvector"
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    # langchain-community è "in sunset" (deprecation notice ufficiale),
+    # ma è ancora il pacchetto che ospita BSHTMLLoader/PDFPlumberLoader/
+    # TextLoader (loaders.py) — nessun pacchetto standalone di
+    # sostituzione completo al momento in cui scrivo.
+    "langchain-community>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "lxml>=6.1.1",
+    # Caricamento PDF (loaders.py, PDFPlumberLoader) e anteprima per la
+    # classificazione (fetch.pdf_text_preview) — un'unica libreria per
+    # entrambi gli usi, non aggiunta una seconda (pypdf) solo per la
+    # variante "poche pagine": `pdfplumber.open(..., pages=[...])`
+    # limita l'apertura alle sole pagine richieste senza dover parsare
+    # tutto il documento, quindi non c'è un vero vantaggio di leggerezza
+    # da un'altra libreria qui. Sostituisce anche Docling (usato in una
+    # versione precedente di questa pipeline): niente
+    # torch/torchvision/docling-ibm-models, solo testo (non Markdown
+    # strutturato — le tabelle diventano testo su più righe), ma per le
+    # guide dei gestori — PDF generati digitalmente, non scansioni — è
+    # sufficiente, e in pratica Docling ha causato più problemi (spazio
+    # disco, installazioni interrotte a metà) di quanti ne risolvesse.
+    # Vedi il commento in cima a loaders.py per i dettagli.
+    "pdfplumber>=0.11",
+    # <0.4: langchain-postgres (qualunque versione >=0.0.12) richiede
+    # pgvector<0.4 — vincolo verificato risolvendo il workspace, non
+    # scelto a caso. Dipendenza diretta anche qui (non solo in common)
+    # perché viz.py usa pgvector.psycopg direttamente per la lettura a
+    # scopo di visualizzazione.
+    "pgvector>=0.2.5,<0.4",
+    "psycopg[binary]>=3.3.4",
+    "python-dotenv>=1.2.2",
+    "requests>=2.34.2",
+    "tqdm>=4.70.0",
+    # Embedding (embed.py) e vector store (vectorstore.py) sono condivisi
+    # con il bot: vivono in bordeus-common, non più qui.
+    # torch/sentence-transformers/langchain-huggingface/langchain-postgres
+    # arrivano transitivamente da lì (langchain-postgres/pgvector restano
+    # anche diretti, vedi sopra). Ora che Docling non c'è più, ingestion
+    # non ha più bisogno di torch in modo diretto.
+    "bordeus-common",
+]
+
+[project.scripts]
+bordeus-ingest = "bordeus_ingest:main"
+
+[tool.uv.sources]
+bordeus-common = { workspace = true }
+
+# Dipendenze di sviluppo: notebook (ipykernel/jupyterlab) e visualizzazione
+# (matplotlib/scikit-learn, usate solo da viz.py — vedi gli import lazy lì
+# dentro). `uv sync` le installa di default; `uv sync --no-dev` dà
+# un'installazione minima adatta a un ambiente che deve solo eseguire
+# `bordeus-ingest` da riga di comando (es. un job schedulato), senza il
+# peso di Jupyter/matplotlib/scikit-learn.
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+    "matplotlib>=3.9",
+    "scikit-learn>=1.5",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"

@@ -1,0 +1,53 @@
+[project]
+name = "bordeus-workspace"
+version = "0.0.0"
+description = "Radice del workspace uv: raggruppa common/, ingestion/ e bot/. Non è un pacchetto installabile a sé — vedi la nota sotto."
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+# Nessun [build-system] qui deliberatamente: questa radice non ha codice
+# proprio da costruire (nessun src/bordeus_workspace/), è solo il
+# contenitore del workspace. Con un [build-system] uv la tratterebbe come
+# un pacchetto installabile e "uv sync" fallirebbe cercando un modulo
+# inesistente. Per installare i membri: "uv sync --all-packages" (o
+# "uv sync --package <nome>" per uno solo) da questa cartella, oppure il
+# solito "uv sync" dentro common/, ingestion/ o bot/.
+
+[tool.uv.workspace]
+members = ["common", "ingestion", "bot"]
+
+# GPU: sia la pipeline di ingestion sia il bot calcolano embedding con lo
+# stesso modello (microsoft/harrier-oss-v1-0.6b, via
+# bordeus_ingest.embed.get_embeddings) sulla stessa macchina con NVIDIA
+# GTX 1080 (Pascal, compute capability 6.1). Dichiarare la sorgente di
+# `torch` una volta sola qui, a livello di workspace, garantisce che
+# ENTRAMBI i progetti risolvano esattamente la stessa build — importante
+# non solo per la GPU, ma perché build diverse di torch potrebbero (in
+# teoria) produrre embedding non bit-per-bit identici a parità di
+# modello: ingestion scrive i chunk, il bot ci fa la similarity search
+# sopra, devono vivere nello stesso spazio vettoriale.
+#
+# Due vincoli da rispettare insieme, altrimenti torch.cuda.is_available()
+# sembra funzionare ma il primo tensore sulla GPU fallisce con "no kernel
+# image is available for execution":
+#
+# 1. torch <2.8 — dalla 2.8 PyTorch ha smesso di includere i kernel per
+#    Maxwell/Pascal/Volta nelle build precompilate (vedi pin in
+#    common/pyproject.toml — dipendenza diretta lì, non più in
+#    ingestion/ o bot/, che la ricevono transitivamente).
+# 2. build CUDA <=12.6 — CUDA 12.8/12.9 hanno rimosso il supporto Pascal
+#    anche lato toolkit; puntiamo quindi all'indice cu126 invece che a
+#    quello di default (che oggi punta a una build CUDA più recente).
+#
+# Se in futuro sostituisci la GPU con una più recente (Turing o più
+# nuova), alza il pin di torch in common/pyproject.toml e cambia l'indice
+# qui sotto. Per tornare a una build CPU-only (es. sviluppo locale senza
+# GPU), sostituisci l'url con "https://download.pytorch.org/whl/cpu".
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

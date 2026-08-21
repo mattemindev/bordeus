@@ -1,0 +1,28 @@
+[project]
+name = "bordeus-common"
+version = "0.1.0"
+description = "Codice condiviso tra ingestion/ e bot/: schema/accesso dati (comuni, users), embedding, vector store"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-huggingface>=0.1.0",
+    "langchain-postgres>=0.0.12",
+    # <0.4: langchain-postgres (qualunque versione >=0.0.12) richiede
+    # pgvector<0.4 — vincolo verificato risolvendo il workspace, non
+    # scelto a caso.
+    "pgvector>=0.2.5,<0.4",
+    "psycopg[binary]>=3.3.4",
+    "sentence-transformers>=5.7.0",
+    # Pin <2.8 e indice CUDA: vedi commento su [tool.uv.sources] nel
+    # pyproject.toml alla radice del workspace (../pyproject.toml).
+    # Dichiarato come dipendenza DIRETTA qui (non lasciato transitivo via
+    # sentence-transformers) perché l'override di sorgente di un
+    # workspace uv si applica in modo affidabile solo a pacchetti che
+    # sono dipendenza diretta di almeno un membro — verificato
+    # empiricamente in una sessione precedente di questo progetto.
+    "torch>=2.6,<2.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"

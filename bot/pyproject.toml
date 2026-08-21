@@ -1,0 +1,41 @@
+[project]
+name = "bordeus-bot"
+version = "0.1.0"
+description = "Bot Telegram di bordeus: onboarding comune, identificazione oggetto da foto (vision), RAG sulle guide di smaltimento."
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Embeddings, PGVector, schema/accesso dati condivisi (comuni, users)
+    # — vedi common/src/bordeus_common/. Il bot non dipende più da
+    # bordeus-ingest: fetch/loaders/chunking sono
+    # concetti solo dell'ingestion, il bot ha bisogno solo del
+    # sottoinsieme condiviso.
+    "bordeus-common",
+    "langchain-core>=1.0",
+    "langchain-ollama>=1.0",
+    "python-dotenv>=1.2.2",
+    "python-telegram-bot>=22.0",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+bordeus-bot = "bordeus_bot:main"
+
+[tool.uv.sources]
+bordeus-common = { workspace = true }
+
+# Notebook di valutazione RAG/system prompt (bot/notebooks/rag_eval.ipynb).
+# `uv sync` le installa di default; `uv sync --no-dev` dà
+# un'installazione minima adatta a chi deve solo eseguire il bot da riga
+# di comando, senza il peso di Jupyter/pandas.
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+    "pandas>=2.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"

@@ -1,0 +1,24 @@
+# Ambiente virtuale del workspace uv (condiviso da common/, ingestion/, bot/)
+.venv/
+
+# Bytecode Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Variabili d'ambiente locali (token, credenziali)
+.env
+
+# Documenti scaricati dalla pipeline di ingestion (dati, non codice)
+knowledge/
+
+# Notebook: output/checkpoint locali
+.ipynb_checkpoints/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
