@@ -41,8 +41,8 @@ import logging
 import os
 import sys
 
-from dotenv import load_dotenv
 from bordeus_common.embed import DEFAULT_MODEL_NAME, EMBEDDING_DIM, get_embeddings
+from dotenv import load_dotenv
 
 from . import viz
 from .pipeline import ComuneInput, run_sub_ato
@@ -66,7 +66,9 @@ def _parse_id_nome_arg(flag: str, value: str) -> tuple[str, str]:
     raw_id = raw_id.strip()
     nome = nome.strip() if sep else raw_id
     if not raw_id:
-        raise argparse.ArgumentTypeError(f"{flag} non valido: {value!r} (atteso 'id:Nome')")
+        raise argparse.ArgumentTypeError(
+            f"{flag} non valido: {value!r} (atteso 'id:Nome')"
+        )
     return raw_id, nome
 
 

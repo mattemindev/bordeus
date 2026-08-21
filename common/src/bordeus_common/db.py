@@ -106,7 +106,9 @@ class SubAto:
     gestore: str
 
 
-def upsert_sub_ato(conn: psycopg.Connection, sub_ato_id: str, nome: str, gestore: str) -> None:
+def upsert_sub_ato(
+    conn: psycopg.Connection, sub_ato_id: str, nome: str, gestore: str
+) -> None:
     """Crea o aggiorna una riga di `sub_ato` (`ON CONFLICT (id) DO
     UPDATE`). Usata dalla pipeline di ingestion."""
     with conn.cursor() as cur:
@@ -124,7 +126,9 @@ def upsert_sub_ato(conn: psycopg.Connection, sub_ato_id: str, nome: str, gestore
 
 def get_sub_ato(conn: psycopg.Connection, sub_ato_id: str) -> SubAto | None:
     with conn.cursor() as cur:
-        cur.execute("SELECT id, nome, gestore FROM sub_ato WHERE id = %s", (sub_ato_id,))
+        cur.execute(
+            "SELECT id, nome, gestore FROM sub_ato WHERE id = %s", (sub_ato_id,)
+        )
         row = cur.fetchone()
     if row is None:
         return None
@@ -155,7 +159,9 @@ def get_comune(conn: psycopg.Connection, comune_id: str) -> Comune | None:
     confermato dall'utente al suo Sub-ATO, es. per scegliere la
     collection giusta in fase di retrieval."""
     with conn.cursor() as cur:
-        cur.execute("SELECT id, nome, sub_ato_id FROM comuni WHERE id = %s", (comune_id,))
+        cur.execute(
+            "SELECT id, nome, sub_ato_id FROM comuni WHERE id = %s", (comune_id,)
+        )
         row = cur.fetchone()
     if row is None:
         return None
@@ -163,7 +169,9 @@ def get_comune(conn: psycopg.Connection, comune_id: str) -> Comune | None:
     return Comune(id=found_id, nome=nome, sub_ato_id=sub_ato_id)
 
 
-def upsert_comune(conn: psycopg.Connection, comune_id: str, nome: str, sub_ato_id: str) -> None:
+def upsert_comune(
+    conn: psycopg.Connection, comune_id: str, nome: str, sub_ato_id: str
+) -> None:
     """Crea o aggiorna una riga di `comuni` (`ON CONFLICT (id) DO
     UPDATE`): ri-ingerire lo stesso Sub-ATO per un comune già noto
     aggiorna nome/sub_ato_id invece di fallire o duplicare. Usata dalla
@@ -249,5 +257,10 @@ def save_user_profile(conn: psycopg.Connection, profile: UserProfile) -> None:
                 pending_comune_id = EXCLUDED.pending_comune_id,
                 updated_at          = now()
             """,
-            (profile.chat_id, profile.comune_id, profile.onboarded, profile.pending_comune_id),
+            (
+                profile.chat_id,
+                profile.comune_id,
+                profile.onboarded,
+                profile.pending_comune_id,
+            ),
         )

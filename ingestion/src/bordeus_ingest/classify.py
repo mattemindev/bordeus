@@ -17,10 +17,26 @@ from __future__ import annotations
 # raccolta", ma è più utile categorizzarlo per la sua natura pratica
 # (date/orari) che come guida generica.
 _KEYWORDS: list[tuple[str, list[str]]] = [
-    ("calendario", ["calendario", "porta a porta", "giorni di raccolta", "orari di conferimento"]),
+    (
+        "calendario",
+        ["calendario", "porta a porta", "giorni di raccolta", "orari di conferimento"],
+    ),
     ("guide", ["regolamento", "guida", "linee guida", "vademecum", "faq"]),
-    ("moduli", ["modulistica", "modulo", "richiesta", "domanda di", "autocertificazione"]),
-    ("servizi", ["servizi", "servizio", "ecocentro", "isola ecologica", "ingombranti", "compostaggio"]),
+    (
+        "moduli",
+        ["modulistica", "modulo", "richiesta", "domanda di", "autocertificazione"],
+    ),
+    (
+        "servizi",
+        [
+            "servizi",
+            "servizio",
+            "ecocentro",
+            "isola ecologica",
+            "ingombranti",
+            "compostaggio",
+        ],
+    ),
 ]
 
 DEFAULT_CATEGORY = "altro"

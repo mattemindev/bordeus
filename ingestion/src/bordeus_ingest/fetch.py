@@ -20,6 +20,7 @@ categoria.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from io import BytesIO
 from urllib.parse import urljoin
@@ -27,6 +28,8 @@ from urllib.parse import urljoin
 import pdfplumber
 import requests
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("bordeus_ingest")
 
 USER_AGENT = (
     "bordeus-ingest/0.2 (+https://github.com/; proof of concept, uso non commerciale)"
@@ -47,7 +50,9 @@ class Page:
     markdown_links: list[str] = field(default_factory=list)
 
 
-def _categorize_links(soup: BeautifulSoup, base_url: str) -> tuple[list[str], list[str]]:
+def _categorize_links(
+    soup: BeautifulSoup, base_url: str
+) -> tuple[list[str], list[str]]:
     """Trova i link a PDF e Markdown nella pagina, risolti ad URL
     assoluti. Guarda solo l'estensione del path (non l'URL intera), così
     un link con querystring viene comunque riconosciuto."""
@@ -123,13 +128,18 @@ def pdf_text_preview(content: bytes, max_pages: int = 2, max_chars: int = 3000) 
     la classificazione — un'anteprima persa non deve bloccare
     l'ingestion, al peggio si ricade sulla classificazione da URL."""
     try:
-        with pdfplumber.open(BytesIO(content), pages=list(range(1, max_pages + 1))) as pdf:
+        with pdfplumber.open(
+            BytesIO(content), pages=list(range(1, max_pages + 1))
+        ) as pdf:
             parts: list[str] = []
             total_len = 0
             for page in pdf.pages:
                 try:
                     text = page.extract_text() or ""
                 except Exception:
+                    logger.warning(
+                        "errore durante l'estrazione del testo dalla pagina di un pdf"
+                    )
                     continue
                 parts.append(text)
                 total_len += len(text)

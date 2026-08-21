@@ -51,7 +51,9 @@ def to_sqlalchemy_url(database_url: str) -> str:
     raise ValueError(f"DATABASE_URL non riconosciuto: {database_url!r}")
 
 
-def get_vectorstore(database_url: str, area_id: str, embeddings: Embeddings) -> PGVector:
+def get_vectorstore(
+    database_url: str, area_id: str, embeddings: Embeddings
+) -> PGVector:
     """Una collection per area Sub-ATO (`collection_name = area_id`):
     tiene i dati di aree diverse logicamente separati all'interno delle
     stesse tabelle condivise di `langchain-postgres`, anche quando più
@@ -65,7 +67,9 @@ def get_vectorstore(database_url: str, area_id: str, embeddings: Embeddings) -> 
     )
 
 
-def stable_chunk_id(area_id: str, source_url: str, chunk_index: int, content: str) -> str:
+def stable_chunk_id(
+    area_id: str, source_url: str, chunk_index: int, content: str
+) -> str:
     """ID deterministico per un chunk: stessa fonte + stesso indice +
     stesso contenuto -> stesso id, così ri-lanciare la pipeline
     sullo stesso URL aggiorna (upsert) i chunk esistenti invece di

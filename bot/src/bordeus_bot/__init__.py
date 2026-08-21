@@ -15,9 +15,15 @@ from __future__ import annotations
 
 import logging
 
-from dotenv import load_dotenv
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from bordeus_common.embed import get_embeddings
+from dotenv import load_dotenv
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from . import config as config_module
 from . import telegram_bot
@@ -42,7 +48,9 @@ def main() -> None:
     # embedding devono vivere nello stesso spazio vettoriale dei chunk
     # già scritti. query_instruction attiva il prefisso istruzione solo
     # lato query (vedi rag.py).
-    embeddings = get_embeddings(cfg.embedding_model, query_instruction=QUERY_INSTRUCTION)
+    embeddings = get_embeddings(
+        cfg.embedding_model, query_instruction=QUERY_INSTRUCTION
+    )
 
     service = telegram_bot.Service(cfg, embeddings)
 
@@ -52,7 +60,9 @@ def main() -> None:
     application.add_handler(CommandHandler("start", telegram_bot.handle_start))
     application.add_handler(CommandHandler("comune", telegram_bot.handle_start))
     application.add_handler(
-        CallbackQueryHandler(telegram_bot.handle_confirmation, pattern="^confirm_comune_")
+        CallbackQueryHandler(
+            telegram_bot.handle_confirmation, pattern="^confirm_comune_"
+        )
     )
     application.add_handler(
         MessageHandler(
@@ -61,7 +71,11 @@ def main() -> None:
         )
     )
 
-    logger.info("bot avviato (modello Ollama: %s, base_url: %s)", cfg.ollama_model, cfg.ollama_base_url)
+    logger.info(
+        "bot avviato (modello Ollama: %s, base_url: %s)",
+        cfg.ollama_model,
+        cfg.ollama_base_url,
+    )
     application.run_polling()
 
 

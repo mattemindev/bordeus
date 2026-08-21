@@ -10,7 +10,9 @@ from dataclasses import dataclass
 class Config:
     telegram_token: str
     database_url: str
-    embedding_model: str | None  # None -> default del pacchetto (bordeus_common.embed.DEFAULT_MODEL_NAME)
+    embedding_model: (
+        str | None
+    )  # None -> default del pacchetto (bordeus_common.embed.DEFAULT_MODEL_NAME)
     ollama_base_url: str
     ollama_model: str
 

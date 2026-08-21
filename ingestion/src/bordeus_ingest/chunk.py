@@ -25,7 +25,10 @@ source_url, kind, tipo) su ciascun chunk.
 from __future__ import annotations
 
 from langchain_core.documents import Document
-from langchain_text_splitters import MarkdownTextSplitter, RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    MarkdownTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 150
@@ -51,7 +54,9 @@ def split_documents(
     chunks: list[Document] = []
 
     if markdown_docs:
-        md_splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        md_splitter = MarkdownTextSplitter(
+            chunk_size=chunk_size, chunk_overlap=chunk_overlap
+        )
         chunks.extend(md_splitter.split_documents(markdown_docs))
 
     if other_docs:

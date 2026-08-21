@@ -14,6 +14,7 @@ dependencies = [
     "langchain-community>=0.3.0",
     "langchain-text-splitters>=0.3.0",
     "lxml>=6.1.1",
+    "openai>=3.3.0",
     # Caricamento PDF (loaders.py, PDFPlumberLoader) e anteprima per la
     # classificazione (fetch.pdf_text_preview) — un'unica libreria per
     # entrambi gli usi, non aggiunta una seconda (pypdf) solo per la
@@ -63,6 +64,7 @@ bordeus-common = { workspace = true }
 [dependency-groups]
 dev = [
     "ipykernel>=6.29",
+    "ipywidgets>=6.29",
     "jupyterlab>=4.2",
     "matplotlib>=3.9",
     "scikit-learn>=1.5",

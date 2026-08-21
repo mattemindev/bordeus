@@ -49,7 +49,9 @@ def get_embeddings(
     """
     name = model_name or os.environ.get("EMBEDDING_MODEL", DEFAULT_MODEL_NAME)
     query_encode_kwargs = {"prompt": query_instruction} if query_instruction else {}
-    embeddings = HuggingFaceEmbeddings(model_name=name, query_encode_kwargs=query_encode_kwargs)
+    embeddings = HuggingFaceEmbeddings(
+        model_name=name, query_encode_kwargs=query_encode_kwargs
+    )
 
     # Controllo esplicito della dimensione: un modello con dimensione
     # diversa da quella attesa scriverebbe silenziosamente dati

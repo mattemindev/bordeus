@@ -45,12 +45,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from bordeus_common import db
+from bordeus_common.vectorstore import add_chunks, get_vectorstore
 from langchain_core.embeddings import Embeddings
 from langchain_postgres import PGVector
 from tqdm import tqdm
-
-from bordeus_common import db
-from bordeus_common.vectorstore import add_chunks, get_vectorstore
 
 from . import classify, knowledge
 from .chunk import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, split_documents
@@ -115,7 +114,15 @@ def fetch_source(source_url: str, comune_id: str = "") -> list[FetchedDoc]:
             tipo,
             f", comune={comune_id}" if comune_id else "",
         )
-        return [FetchedDoc(url=source_url, kind="pdf", tipo=tipo, content=content, comune_id=comune_id)]
+        return [
+            FetchedDoc(
+                url=source_url,
+                kind="pdf",
+                tipo=tipo,
+                content=content,
+                comune_id=comune_id,
+            )
+        ]
 
     if suffix.endswith((".md", ".markdown")):
         text = fetch_markdown_text(source_url)
@@ -126,14 +133,30 @@ def fetch_source(source_url: str, comune_id: str = "") -> list[FetchedDoc]:
             tipo,
             f", comune={comune_id}" if comune_id else "",
         )
-        return [FetchedDoc(url=source_url, kind="markdown", tipo=tipo, content=text, comune_id=comune_id)]
+        return [
+            FetchedDoc(
+                url=source_url,
+                kind="markdown",
+                tipo=tipo,
+                content=text,
+                comune_id=comune_id,
+            )
+        ]
 
     page = fetch_page(source_url)
     docs: list[FetchedDoc] = []
 
-    tipo = classify.guess_doc_type(url=source_url, title=page.title, text_sample=page.text_sample)
+    tipo = classify.guess_doc_type(
+        url=source_url, title=page.title, text_sample=page.text_sample
+    )
     docs.append(
-        FetchedDoc(url=source_url, kind="html", tipo=tipo, content=page.raw_html, comune_id=comune_id)
+        FetchedDoc(
+            url=source_url,
+            kind="html",
+            tipo=tipo,
+            content=page.raw_html,
+            comune_id=comune_id,
+        )
     )
     logger.info(
         "scaricata pagina HTML %s (tipo=%s%s)",
@@ -158,7 +181,11 @@ def fetch_source(source_url: str, comune_id: str = "") -> list[FetchedDoc]:
         # loaders.py), solo un campione per orientare la classificazione.
         preview = pdf_text_preview(content)
         tipo = classify.guess_doc_type(url=pdf_url, text_sample=preview)
-        docs.append(FetchedDoc(url=pdf_url, kind="pdf", tipo=tipo, content=content, comune_id=comune_id))
+        docs.append(
+            FetchedDoc(
+                url=pdf_url, kind="pdf", tipo=tipo, content=content, comune_id=comune_id
+            )
+        )
 
     md_bar = tqdm(page.markdown_links, desc="Markdown", unit="doc")
     for md_url in md_bar:
@@ -166,10 +193,20 @@ def fetch_source(source_url: str, comune_id: str = "") -> list[FetchedDoc]:
         try:
             text = fetch_markdown_text(md_url)
         except Exception as exc:
-            logger.warning("fetch Markdown fallito %s: %s (salto e proseguo)", md_url, exc)
+            logger.warning(
+                "fetch Markdown fallito %s: %s (salto e proseguo)", md_url, exc
+            )
             continue
         tipo = classify.guess_doc_type(url=md_url, text_sample=text)
-        docs.append(FetchedDoc(url=md_url, kind="markdown", tipo=tipo, content=text, comune_id=comune_id))
+        docs.append(
+            FetchedDoc(
+                url=md_url,
+                kind="markdown",
+                tipo=tipo,
+                content=text,
+                comune_id=comune_id,
+            )
+        )
 
     return docs
 
@@ -191,20 +228,30 @@ def save_to_knowledge(
 
     for doc in docs:
         filename = knowledge.sanitize_filename(doc.url, _EXT_BY_KIND[doc.kind])
-        file_path = knowledge.target_path(area_id, doc.tipo, filename, comune_id=doc.comune_id)
+        file_path = knowledge.target_path(
+            area_id, doc.tipo, filename, comune_id=doc.comune_id
+        )
         if isinstance(doc.content, bytes):
             file_path.write_bytes(doc.content)
         else:
             file_path.write_text(doc.content, encoding="utf-8")
         knowledge.register_file(
-            area_id, manifest, file_path, doc.url, doc.kind, doc.tipo, comune_id=doc.comune_id
+            area_id,
+            manifest,
+            file_path,
+            doc.url,
+            doc.kind,
+            doc.tipo,
+            comune_id=doc.comune_id,
         )
 
     return manifest
 
 
 def fetch_to_knowledge(
-    area_id: str, source_urls: list[str], comune_urls: dict[str, list[str]] | None = None
+    area_id: str,
+    source_urls: list[str],
+    comune_urls: dict[str, list[str]] | None = None,
 ) -> int:
     """Fetch di una o più fonti condivise dall'area (`source_urls`, un
     giro di rete per URL) più, opzionalmente, fonti specifiche di
@@ -261,22 +308,41 @@ def run_sub_ato(
     conn = db.connect(database_url)
 
     db.upsert_sub_ato(conn, sub_ato_id, sub_ato_nome, gestore)
-    logger.info("area registrata in Postgres: %s (%r, gestore=%r)", sub_ato_id, sub_ato_nome, gestore)
+    logger.info(
+        "area registrata in Postgres: %s (%r, gestore=%r)",
+        sub_ato_id,
+        sub_ato_nome,
+        gestore,
+    )
 
     for c in comuni:
         db.upsert_comune(conn, c.id, c.nome, sub_ato_id)
-        logger.info("comune registrato in Postgres: %s (%r) -> %s", c.id, c.nome, sub_ato_id)
+        logger.info(
+            "comune registrato in Postgres: %s (%r) -> %s", c.id, c.nome, sub_ato_id
+        )
 
     fetch_to_knowledge(sub_ato_id, source_urls, comune_urls=comune_urls)
 
     documents = load_knowledge(sub_ato_id)
-    logger.info("%s: caricati %d documenti da knowledge/%s/", sub_ato_id, len(documents), sub_ato_id)
+    logger.info(
+        "%s: caricati %d documenti da knowledge/%s/",
+        sub_ato_id,
+        len(documents),
+        sub_ato_id,
+    )
 
-    chunks = split_documents(documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    chunks = split_documents(
+        documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap
+    )
     logger.info("%s: %d chunk generati", sub_ato_id, len(chunks))
 
     vectorstore = get_vectorstore(database_url, sub_ato_id, embeddings)
     ids = add_chunks(vectorstore, chunks)
-    logger.info("%s: %d chunk scritti su Postgres (collection=%s)", sub_ato_id, len(ids), sub_ato_id)
+    logger.info(
+        "%s: %d chunk scritti su Postgres (collection=%s)",
+        sub_ato_id,
+        len(ids),
+        sub_ato_id,
+    )
 
     return vectorstore
