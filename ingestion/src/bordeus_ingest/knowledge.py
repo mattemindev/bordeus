@@ -54,7 +54,9 @@ class ManifestEntry:
     source_url: str
     kind: str  # "html" | "pdf" | "markdown"
     tipo: str  # categoria da classify.guess_doc_type
-    comune_id: str = ""  # vuoto = contenuto condiviso dall'area, altrimenti specifico di quel comune
+    comune_id: str = (
+        ""  # vuoto = contenuto condiviso dall'area, altrimenti specifico di quel comune
+    )
 
 
 def area_dir(area_id: str) -> Path:
@@ -119,7 +121,9 @@ def load_manifest(area_id: str) -> dict[str, dict]:
 def save_manifest(area_id: str, manifest: dict[str, dict]) -> None:
     path = manifest_path(area_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def register_file(

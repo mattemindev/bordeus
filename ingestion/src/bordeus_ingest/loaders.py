@@ -34,7 +34,11 @@ from __future__ import annotations
 
 import logging
 
-from langchain_community.document_loaders import BSHTMLLoader, PDFPlumberLoader, TextLoader
+from langchain_community.document_loaders import (
+    BSHTMLLoader,
+    PDFPlumberLoader,
+    TextLoader,
+)
 from langchain_core.documents import Document
 
 from . import knowledge
@@ -63,13 +67,17 @@ def load_knowledge(area_id: str) -> list[Document]:
     for rel_path, entry in manifest.items():
         file_path = base_dir / rel_path
         if not file_path.exists():
-            logger.warning("file nel manifest ma assente su disco: %s (salto)", file_path)
+            logger.warning(
+                "file nel manifest ma assente su disco: %s (salto)", file_path
+            )
             continue
 
         loader_cls = _LOADER_BY_SUFFIX.get(file_path.suffix.lower())
         if loader_cls is None:
             logger.warning(
-                "nessun loader per l'estensione %s (salto %s)", file_path.suffix, file_path
+                "nessun loader per l'estensione %s (salto %s)",
+                file_path.suffix,
+                file_path,
             )
             continue
 

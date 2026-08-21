@@ -1,0 +1,117 @@
+name: CI
+
+# Due job: "checks" (controlli statici — sintassi, TOML, notebook,
+# lint) e "release" (python-semantic-release: calcola la prossima
+# versione dai Conventional Commits, aggiorna CHANGELOG.md, crea tag e
+# release GitHub — solo su push a main, solo dopo che "checks" passa).
+#
+# Il progetto non ha ancora una suite pytest (vedi README, "Sviluppi
+# futuri" > "Test automatici") — "checks" copre i controlli fatti a
+# mano ad ogni modifica rilevante durante lo sviluppo, automatizzati
+# qui perché non se ne dimentichi uno. Aggiungi un job "test" con
+# `uv run pytest` quando la suite esisterà davvero — non prima, per non
+# far finta di avere una copertura che non c'è.
+#
+# "checks" non installa le dipendenze del progetto: né ruff né i
+# controlli TOML/notebook (Python standard library) ne hanno bisogno, e
+# le dipendenze vere includono build CUDA di torch (vedi pyproject.toml,
+# GPU Pascal) inutili da scaricare su un runner senza GPU — solo
+# rallenterebbero la CI senza validare nulla che i controlli qui sotto
+# non coprano già.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Installa uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+      - name: Lint (ruff) — nessuna dipendenza del progetto necessaria
+        run: uvx ruff check .
+
+      - name: TOML valido (ogni pyproject.toml del workspace)
+        run: |
+          python3 -c "
+          import tomllib, pathlib, sys
+          errori = []
+          for p in sorted(pathlib.Path('.').rglob('pyproject.toml')):
+              try:
+                  with open(p, 'rb') as f:
+                      tomllib.load(f)
+                  print(f'{p}: valido')
+              except Exception as e:
+                  errori.append(f'{p}: {e}')
+          if errori:
+              print('\n'.join(errori))
+              sys.exit(1)
+          "
+
+      - name: Notebook JSON validi
+        run: |
+          python3 -c "
+          import json, pathlib, sys
+          errori = []
+          for p in sorted(pathlib.Path('.').rglob('*.ipynb')):
+              try:
+                  json.loads(p.read_text())
+                  print(f'{p}: valido')
+              except Exception as e:
+                  errori.append(f'{p}: {e}')
+          if errori:
+              print('\n'.join(errori))
+              sys.exit(1)
+          "
+
+      - name: Sintassi Python (py_compile su ogni file del workspace)
+        run: |
+          python3 -c "
+          import py_compile, pathlib, sys
+          errori = []
+          for p in sorted(pathlib.Path('.').rglob('*.py')):
+              try:
+                  py_compile.compile(str(p), doraise=True)
+              except py_compile.PyCompileError as e:
+                  errori.append(str(e))
+          print(f'{sum(1 for _ in pathlib.Path(\".\").rglob(\"*.py\"))} file controllati')
+          if errori:
+              print('\n'.join(errori))
+              sys.exit(1)
+          "
+
+  release:
+    # Solo su push a main dopo che "checks" passa (mai sui pull request:
+    # una release non ha senso su un branch che non è ancora stato
+    # unito). "needs: checks" fa da gate — semantic-release non deve mai
+    # girare su codice che non ha superato lint/sintassi.
+    needs: checks
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (storia completa)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # python-semantic-release deve analizzare tutti i commit dal
+          # tag precedente: un checkout superficiale (il default) non
+          # avrebbe la storia necessaria.
+          fetch-depth: 0
+
+      - name: Python Semantic Release
+        # Versione esatta richiesta (non è supportato un tag generico
+        # tipo @v10): controlla https://github.com/python-semantic-release/python-semantic-release/releases
+        # per una versione più recente prima di aggiornare questo pin.
+        uses: python-semantic-release/python-semantic-release@v10.6.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}

@@ -15,19 +15,17 @@ import asyncio
 import base64
 import logging
 
+from bordeus_common import db as bot_db
+from bordeus_common.vectorstore import get_vectorstore
 from langchain_ollama import ChatOllama
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
 )
 from telegram.ext import ContextTypes
-
-from bordeus_common import db as bot_db
-from bordeus_common.vectorstore import get_vectorstore
 
 from . import geocode, i18n, identify, rag
 from .config import Config
@@ -325,7 +323,9 @@ async def handle_confirmation(
     nessun messaggio all'utente, bottone che sembra non fare nulla."""
     query = update.callback_query
     try:
-        await query.answer()  # obbligatorio: toglie lo stato di "caricamento" dal bottone lato client
+        await (
+            query.answer()
+        )  # obbligatorio: toglie lo stato di "caricamento" dal bottone lato client
     except Exception as exc:
         # Non interrompiamo per questo: il caso più comune è un timeout
         # innocuo della UI del bottone, la conferma vera e propria può

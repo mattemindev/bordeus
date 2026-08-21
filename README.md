@@ -1,5 +1,7 @@
 # bordeus
 
+[![CI](https://github.com/mattemindev/bordeus/actions/workflows/ci.yml/badge.svg)](https://github.com/mattemindev/bordeus/actions/workflows/ci.yml)
+
 Un bot Telegram che ti dice come buttare la spazzatura in Valle
 d'Aosta. Gli mandi la foto di un oggetto (o lo descrivi a parole) e lui
 ti dice in che bidone va usando le guide ufficiali del gestore rifiuti del tuo comune.
@@ -341,3 +343,22 @@ deliberatamente a una fase successiva:
 ## Licenza
 
 [MIT](LICENSE).
+
+## Release
+
+Automatizzate con [Conventional Commits](https://www.conventionalcommits.org/)
+
+- [python-semantic-release](https://python-semantic-release.readthedocs.io/):
+  ogni push su `main` che supera i controlli della CI (`.github/workflows/ci.yml`)
+  calcola la prossima versione dal tipo dei commit (`fix:` → patch,
+  `feat:` → minor, `BREAKING CHANGE`/`feat!:` → major — con
+  `major_on_zero = false` in [pyproject.toml](pyproject.toml): resta in
+  `0.x` con le breaking change che alzano il minor, non salta a `1.0.0`,
+  finché il progetto è un PoC), aggiorna `CHANGELOG.md`, crea il tag e la
+  release su GitHub — **nessun tag o release va creato a mano**.
+
+## Changelog
+
+Le modifiche rilevanti tra una versione e l'altra sono documentate in
+[CHANGELOG.md](CHANGELOG.md) — generato automaticamente dalla
+cronologia dei commit (vedi sopra), non scritto a mano.

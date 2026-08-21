@@ -104,7 +104,7 @@ modalità di smaltimento (RAG) — tutto in Python, riusando
 
 Richiede [uv](https://docs.astral.sh/uv/), Postgres con `pgvector` in
 esecuzione (`../deployment/docker-compose.yml`), **Ollama** in esecuzione
-con un modello multimodale scaricato (`ollama pull gemma3:...` o
+con un modello multimodale scaricato (`ollama pull gemma4:...` o
 equivalente — qualunque modello con supporto immagini funziona, basta
 configurarne il nome in `.env`), e almeno un comune già popolato dalla
 pipeline di ingestion.
@@ -153,7 +153,7 @@ applica soltanto a `embed_query` (mai a `embed_documents`) tramite
 
 ## Struttura
 
-```
+```plaintext
 pyproject.toml         # dipende da bordeus-common (workspace source)
 .env.example
 src/bordeus_bot/
@@ -200,8 +200,3 @@ qui: vivono in `../common/src/bordeus_common/db.py`, condiviso con
   `upsert_comune`, chiamate da `bordeus_ingest.pipeline.run_sub_ato`,
   in un pacchetto diverso — vedi `../ingestion/README.md`) — il bot li
   legge soltanto.
-- **Conferma con stato persistito, non in memoria**: `pending_comune_id`
-  vive in Postgres (`users`), non in una variabile del processo bot —
-  un riavvio del bot durante una conferma in sospeso non la perde (anche
-  se, in pratica, l'utente dovrà comunque ritoccare il bottone se il
-  messaggio Telegram originale non è più nella sessione).
