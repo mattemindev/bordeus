@@ -1,6 +1,6 @@
 [project]
 name = "bordeus-workspace"
-version = "0.0.0"
+version = "0.1.0"
 description = "Radice del workspace uv: raggruppa common/, ingestion/ e bot/. Non è un pacchetto installabile a sé — vedi la nota sotto."
 license = "MIT"
 requires-python = ">=3.11"
