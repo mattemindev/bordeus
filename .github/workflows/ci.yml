@@ -114,4 +114,4 @@ jobs:
         # per una versione più recente prima di aggiornare questo pin.
         uses: python-semantic-release/python-semantic-release@v10.6.1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.RELEASE_TOKEN }}
