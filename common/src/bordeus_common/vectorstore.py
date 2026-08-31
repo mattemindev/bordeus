@@ -104,9 +104,39 @@ def add_chunks(vectorstore: PGVector, chunks: list[Document]) -> list[str]:
     ids: list[str] = []
     for chunk in chunks:
         area_id = chunk.metadata.get("area_id", "")
-        source_url = chunk.metadata.get("source_url", "")
-        idx = counters.get(source_url, 0)
-        counters[source_url] = idx + 1
-        ids.append(stable_chunk_id(area_id, source_url, idx, chunk.page_content))
+        # "source" è la chiave che l'ingestion scrive (percorso relativo
+        # all'area). "source_url" è il nome che usava la pipeline a
+        # crawl: resta come ripiego per non rompere una collection
+        # scritta da quella versione, ma non dovrebbe più comparire.
+        # Senza questo, ogni chunk ricadeva sulla stessa chiave vuota e
+        # l'indice diventava globale sulla lista: bastava aggiungere una
+        # voce a un file per far slittare l'indice di tutti i chunk
+        # successivi e cambiarne l'id, lasciando orfana metà collection.
+        source = chunk.metadata.get("source") or chunk.metadata.get("source_url", "")
+        idx = counters.get(source, 0)
+        counters[source] = idx + 1
+        ids.append(stable_chunk_id(area_id, source, idx, chunk.page_content))
 
     return vectorstore.add_documents(chunks, ids=ids)
+
+
+def reset_collection(database_url: str, area_id: str, embeddings) -> PGVector:
+    """Svuota la collection di un'area e la ricrea.
+
+    Serve perché `stable_chunk_id` include il contenuto del chunk:
+    l'upsert aggiorna i chunk che riesce a ricalcolare uguali, ma non
+    cancella quelli che l'ingestion non produce più. Finché la strategia
+    di chunking resta la stessa il problema non si vede; quando cambia
+    (o quando una voce viene tolta da un Markdown), i vecchi chunk
+    restano nel vector store e continuano a competere nel retrieval —
+    con il risultato che una correzione ai dati sembra non avere
+    effetto, o peggio ne ha metà.
+
+    Non è il comportamento predefinito perché un `sync` normale deve
+    poter aggiornare senza buttare via tutto: è esplicito
+    (`sync --reset`), da usare dopo un cambio di chunking o quando si
+    vuole la certezza che la collection rispecchi esattamente i file.
+    """
+    vectorstore = get_vectorstore(database_url, area_id, embeddings)
+    vectorstore.delete_collection()
+    return get_vectorstore(database_url, area_id, embeddings)

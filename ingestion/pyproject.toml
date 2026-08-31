@@ -1,35 +1,27 @@
 [project]
 name = "bordeus-ingest"
 version = "0.1.0"
-description = "Pipeline di ingestion RAG per bordeus: HTML+PDF+Markdown -> chunk (LangChain) -> embedding (HF) -> Postgres/pgvector"
+description = "Ingestion semi-automatica per bordeus: fonti del gestore -> Markdown curato -> vector store (RAG) + tabella delle date di raccolta"
 license = "MIT"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "beautifulsoup4>=4.15.0",
-    # langchain-community è "in sunset" (deprecation notice ufficiale),
-    # ma è ancora il pacchetto che ospita BSHTMLLoader/PDFPlumberLoader/
-    # TextLoader (loaders.py) — nessun pacchetto standalone di
-    # sostituzione completo al momento in cui scrivo.
-    "langchain-community>=0.3.0",
+    # langchain-community non serve più: i loader HTML/PDF
+    # (BSHTMLLoader/PDFPlumberLoader/TextLoader) erano necessari quando la
+    # pipeline scaricava e caricava fonti eterogenee. Ora ogni fonte è
+    # Markdown curato, e leggerlo è read_text().
+    "langchain-core>=1.0",
     "langchain-text-splitters>=0.3.0",
-    "lxml>=6.1.1",
-    "openai>=3.3.0",
-    # Caricamento PDF (loaders.py, PDFPlumberLoader) e anteprima per la
-    # classificazione (fetch.pdf_text_preview) — un'unica libreria per
-    # entrambi gli usi, non aggiunta una seconda (pypdf) solo per la
-    # variante "poche pagine": `pdfplumber.open(..., pages=[...])`
-    # limita l'apertura alle sole pagine richieste senza dover parsare
-    # tutto il documento, quindi non c'è un vero vantaggio di leggerezza
-    # da un'altra libreria qui. Sostituisce anche Docling (usato in una
-    # versione precedente di questa pipeline): niente
-    # torch/torchvision/docling-ibm-models, solo testo (non Markdown
-    # strutturato — le tabelle diventano testo su più righe), ma per le
-    # guide dei gestori — PDF generati digitalmente, non scansioni — è
-    # sufficiente, e in pratica Docling ha causato più problemi (spazio
-    # disco, installazioni interrotte a metà) di quanti ne risolvesse.
-    # Vedi il commento in cima a loaders.py per i dettagli.
+    # Estrazione del vocabolario dal PDF del riciclabolario
+    # (extract/vocabolario.py). `pages=[...]` limita l'apertura alle sole
+    # pagine richieste, quindi copre sia la lettura completa sia
+    # un'anteprima veloce senza una seconda libreria.
     "pdfplumber>=0.11",
+    # Estrazione del calendario da immagine (extract/calendario.py) via un
+    # endpoint OpenAI-compatibile — Ollama in locale o un provider remoto,
+    # a scelta con le variabili d'ambiente INGEST_VISION_*.
+    "openai>=1.40",
+    "pydantic>=2.7",
     # <0.4: langchain-postgres (qualunque versione >=0.0.12) richiede
     # pgvector<0.4 — vincolo verificato risolvendo il workspace, non
     # scelto a caso. Dipendenza diretta anche qui (non solo in common)
@@ -38,16 +30,30 @@ dependencies = [
     "pgvector>=0.2.5,<0.4",
     "psycopg[binary]>=3.3.4",
     "python-dotenv>=1.2.2",
+    # Solo per scaricare il PDF del riciclabolario quando gli si passa un
+    # URL invece di un percorso locale (extract/vocabolario.py).
     "requests>=2.34.2",
     "tqdm>=4.70.0",
-    # Embedding (embed.py) e vector store (vectorstore.py) sono condivisi
-    # con il bot: vivono in bordeus-common, non più qui.
-    # torch/sentence-transformers/langchain-huggingface/langchain-postgres
-    # arrivano transitivamente da lì (langchain-postgres/pgvector restano
-    # anche diretti, vedi sopra). Ora che Docling non c'è più, ingestion
-    # non ha più bisogno di torch in modo diretto.
+    # Embedding (embed.py), vector store (vectorstore.py) e accesso alla
+    # tabella dei calendari (calendario.py) sono condivisi con il bot:
+    # vivono in bordeus-common. torch/sentence-transformers/
+    # langchain-huggingface/langchain-postgres arrivano transitivamente
+    # da lì.
     "bordeus-common",
 ]
+
+# Rimosse in questa versione, dopo che la sperimentazione nei notebook ha
+# scelto un'altra strada: unstructured[all-docs,local-inference],
+# paddleocr, paddlepaddle, rapidocr, pymupdf, pillow-heif erano tutte
+# tentativi di leggere il calendario con OCR/layout analysis. Nessuno
+# funzionava: quei calendari sono griglie in cui la posizione della cella
+# nella colonna È l'informazione (il giorno del mese), e un OCR restituisce
+# il testo avendo perso proprio quella. La strada scelta è un modello
+# multimodale con output strutturato, che legge la griglia come griglia —
+# e che come dipendenza costa un client HTTP invece di alcuni GB di ruote
+# con CUDA e modelli di layout al seguito.
+# beautifulsoup4/lxml sono cadute con il crawl HTML: non c'è più nessuna
+# pagina web da parsare.
 
 [project.scripts]
 bordeus-ingest = "bordeus_ingest:main"

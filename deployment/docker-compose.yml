@@ -12,6 +12,10 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql
+      - ../migrations/0001_init.sql:/docker-entrypoint-initdb.d/0001_init.sql
+      - ../migrations/0002_sub_ato.sql:/docker-entrypoint-initdb.d/0002_sub_ato.sql
+      - ../migrations/0003_raccolta_date.sql:/docker-entrypoint-initdb.d/0003_raccolta_date.sql
+      - ../migrations/0004_raccolta_materiale.sql:/docker-entrypoint-initdb.d/0004_raccolta_materiale.sql
 
 volumes:
   pgdata:

@@ -19,6 +19,32 @@ workspace.
   l'onboarding (`resolve_comune_by_name`, `get_sub_ato`, `get_comune`)
   e gestisce i profili utente (`get_user_profile`/`save_user_profile`,
   incluso lo stato di conferma in sospeso).
+- **`calendario.py`** — date di raccolta porta a porta (tabella
+  `raccolta_date`), scritte dall'ingestion (`replace_calendario`) e
+  lette dal tool del bot (`prossima_raccolta`,
+  `categorie_disponibili`). Vive qui per lo stesso motivo di `db.py`:
+  nessuno dei due pacchetti la possiede più dell'altro, e la regola di
+  normalizzazione delle categorie (maiuscolo, spazi compattati) deve
+  essere **la stessa in scrittura e in lettura** — se le due parti
+  divergessero, il bot cercherebbe categorie che non esistono e
+  risponderebbe "nessuna data trovata" senza nessun errore. Contiene
+  anche il fallback a due livelli per le frazioni: se la frazione
+  dell'utente ha un calendario proprio si usa quello, altrimenti si
+  ricade su quello dell'intero comune.
+
+  Il calendario **non** passa dal vector store: "la prossima raccolta
+  dopo oggi" è un confronto fra date, non una ricerca per similarità.
+  Vedi `../migrations/0003_raccolta_date.sql`.
+
+- **`log.py`** — livello di log `TRACE` (5), sotto DEBUG, per i contenuti
+  verbosi: system prompt assemblati, chunk recuperati, argomenti e
+  risultati delle chiamate agli strumenti. Un livello a sé perché a
+  DEBUG quei contenuti — migliaia di caratteri per ogni messaggio —
+  renderebbero DEBUG inutilizzabile per tutto il resto. Espone
+  `setup_logging()` (legge `LOG_LEVEL`, che accetta anche `TRACE`),
+  `set_level()` per accenderlo su un solo logger nei notebook, e
+  `blocco()` per delimitare il testo multilinea nei log.
+  ⚠️ A TRACE finisce nei log anche il contenuto dei messaggi degli utenti.
 - **`embed.py`** — wrapper del modello di embedding Hugging Face
   (`get_embeddings()`), con un controllo esplicito sulla dimensione dei
   vettori prodotti (`EMBEDDING_DIM`) per evitare di scrivere
@@ -38,7 +64,7 @@ La knowledge base RAG vera e propria (chunk con embedding) non è gestita
 da `db.py`: la scrive `langchain-postgres` (`vectorstore.py`), che gestisce
 da sola le proprie tabelle (`langchain_pg_collection`/
 `langchain_pg_embedding`) — `db.py` si occupa solo di `sub_ato`, `comuni`
-e `users`.
+e `users`, `calendario.py` di `raccolta_date` e `frazioni`.
 
 ## GPU (NVIDIA GTX 1080)
 
@@ -58,7 +84,9 @@ dettagli.
 pyproject.toml
 src/bordeus_common/
 ├── __init__.py
+├── calendario.py    # date di raccolta (raccolta_date) + fallback per frazione
 ├── db.py            # aree Sub-ATO, comuni, profili utente
 ├── embed.py         # wrapper HuggingFaceEmbeddings
+├── log.py           # livello TRACE (5) e configurazione dei log
 └── vectorstore.py   # scrittura/lettura su Postgres via langchain-postgres
 ```

@@ -1,348 +1,263 @@
-"""Orchestrazione della pipeline di ingestion.
+"""Orchestrazione: da `knowledge/<area_id>/` a Postgres.
 
-Gli embedding sono raggruppati per **area Sub-ATO**, non per singolo
-comune: un gestore può servire più aree con contenuti diversi (es.
-Quendoz, Valle d'Aosta, gestisce sia il Sub-ATO C sia il D con pagine
-guida separate), quindi l'area — non il gestore — è la chiave giusta.
-Un'area può avere più di una fonte da ingerire (es. una pagina specifica
-dell'area + un vocabolario/glossario condiviso da tutte le aree dello
-stesso gestore): fetch_to_knowledge accetta una lista di URL, non uno
-solo.
+Due destinazioni distinte, non più una sola:
 
-Non tutto il contenuto di un'area è però davvero condiviso: il
-calendario di raccolta porta a porta, ad esempio, può variare da un
-comune all'altro della stessa area per motivi logistici, anche sotto lo
-stesso gestore (caso reale: TeknoService Italia, Sub-ATO E, Donnas e
-Pont-Saint-Martin — comuni confinanti — hanno calendari diversi).
-`run_sub_ato` accetta quindi anche `comune_urls`, fonti aggiuntive
-specifiche di un singolo comune: i chunk risultanti restano nella stessa
-collection dell'area (non una collection separata per comune — vedi
-`bordeus_common.vectorstore`), ma taggati con `comune_id` nel
-metadata, così il bot può filtrare in fase di retrieval (contenuto
-condiviso dell'area PIÙ quello specifico del comune dell'utente, mai
-quello di un comune vicino). Nessun vincolo su quali categorie possano
-essere specifiche di un comune: lo decide chi lancia l'ingestion,
-caso per caso, in base a come il gestore reale organizza i contenuti.
+1. **Vector store** (una collection per area Sub-ATO) — vocabolario,
+   guide, informazioni generali. Contenuto su cui ha senso una ricerca
+   per similarità semantica: l'utente descrive un oggetto a parole sue e
+   il retrieval trova la voce giusta anche se non è scritta con le stesse
+   parole.
+2. **Tabella `raccolta_date`** — i calendari. Contenuto su cui la ricerca
+   semantica è lo strumento sbagliato: "la prossima raccolta dopo oggi" è
+   un confronto fra date, e l'unico modo di sbagliarlo è chiedere a un
+   modello di farlo leggendo un elenco. Vedi
+   `bordeus_common.calendario` e `migrations/0003_raccolta_date.sql`.
 
-Passaggi:
+Non c'è più nessun passaggio di rete qui dentro. La pipeline precedente
+scaricava pagine HTML, ne seguiva i link a PDF, indovinava una categoria
+con un'euristica a parole chiave e caricava tutto: molta meccanica per
+produrre chunk che andavano comunque riscritti a mano, perché il
+contenuto che conta è in tabelle e in immagini che l'estrazione
+automatica appiattisce. Ora la rete la tocca solo chi lancia un
+estrattore (`extract/`), una volta per revisione della fonte, e il
+risultato passa da una rilettura umana prima di arrivare qui.
 
-0. db.upsert_sub_ato + db.upsert_comune — registra l'area e i comuni
-   che vi appartengono (non serve che esistano già)
-1. fetch_source (per ogni URL, area-wide o per-comune) + save_to_knowledge
-   — un giro di rete per URL, scritto su disco
-   (knowledge/<area_id>/<categoria>/ o
-   knowledge/<area_id>/_comuni/<comune_id>/<categoria>/)
-2. loaders.load_knowledge — carica con i loader di LangChain
-3. chunk.split_documents — chunking con i text splitter di LangChain
-4. vectorstore.add_chunks — embedding + scrittura su Postgres (langchain-postgres)
+I calendari si scoprono da `_calendari/<comune>/`, con le frazioni in
+`_calendari/<comune>/_frazioni/<hamlet>/`: il percorso dice a chi si
+applica il file, il manifest dice solo quale flusso locale raccoglie
+quale materiale.
 
-Un PDF o Markdown che fallisce il fetch non blocca gli altri (solo
-loggato) — stessa filosofia della versione precedente.
+Ordine delle operazioni, e perché: prima il manifest e la scoperta dei
+calendari (che validano tutto e falliscono senza aver scritto niente),
+poi l'anagrafica (area, comuni, frazioni), poi i calendari, poi il RAG. I calendari prima del RAG perché
+sono la parte che il bot può sbagliare in silenzio: se una categoria non
+combacia con il vocabolario, il log del passaggio calendari lo mostra
+subito, prima che l'attesa dell'embedding di tutta l'area riempia il
+terminale.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from dataclasses import dataclass
+from pathlib import Path
 
 from bordeus_common import db
-from bordeus_common.vectorstore import add_chunks, get_vectorstore
+from bordeus_common.calendario import upsert_frazione
+from bordeus_common.vectorstore import add_chunks, get_vectorstore, reset_collection
 from langchain_core.embeddings import Embeddings
 from langchain_postgres import PGVector
 from tqdm import tqdm
 
-from . import classify, knowledge
+from . import calendario as calendario_ingest
+from . import documents, knowledge, manifest
 from .chunk import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, split_documents
-from .fetch import fetch_markdown_text, fetch_page, fetch_pdf_bytes, pdf_text_preview
-from .loaders import load_knowledge
 
 logger = logging.getLogger("bordeus_ingest")
 
 
-@dataclass
-class ComuneInput:
-    """Un comune coperto dall'area Sub-ATO da ingerire: giusto quello
-    che serve per l'upsert in tabella `comuni` (id + nome) — l'area di
-    appartenenza è condivisa da tutti i comuni della stessa ingestion,
-    vedi run_sub_ato."""
-
-    id: str
-    nome: str
+def load_manifest(area: str) -> manifest.AreaManifest:
+    """Carica il manifest di un'area indicata per id o per percorso."""
+    area_dir = knowledge.resolve_area_dir(area)
+    return manifest.load(area_dir / manifest.MANIFEST_FILENAME)
 
 
-@dataclass
-class FetchedDoc:
-    """Un documento scaricato, ancora in memoria: url, categoria stimata
-    e contenuto grezzo (bytes per i PDF, str per HTML/Markdown).
+def registra_anagrafica(
+    conn, area: manifest.AreaManifest, calendari: list[knowledge.CalendarioTrovato]
+) -> None:
+    """Upsert di area, comuni e frazioni. Idempotente.
 
-    comune_id vuoto (default) = contenuto condiviso dall'area; se
-    valorizzato, il documento è specifico di quel comune (es. un
-    calendario di raccolta) e viene taggato di conseguenza fino al
-    chunk finale nel vector store."""
-
-    url: str
-    kind: str  # "html" | "pdf" | "markdown"
-    tipo: str
-    content: bytes | str
-    comune_id: str = ""
-
-
-_EXT_BY_KIND = {"html": ".html", "pdf": ".pdf", "markdown": ".md"}
-
-
-def fetch_source(source_url: str, comune_id: str = "") -> list[FetchedDoc]:
-    """Un solo giro di rete: scarica la fonte data (pagina HTML, con
-    scoperta dei suoi PDF/Markdown linkati — oppure un PDF o Markdown
-    autonomo, se l'URL stesso punta direttamente a uno di questi, senza
-    nessuna pagina HTML che lo linki: caso reale, alcuni gestori
-    pubblicano calendari come PDF a sé stanti, non dentro una pagina),
-    classificandoli per categoria, e li tiene in memoria — nessuna
-    scrittura su disco qui (vedi save_to_knowledge).
-
-    comune_id, se dato, marca l'intera fonte (più eventuali link
-    scoperti, se la fonte è una pagina HTML) come specifica di quel
-    comune, non condivisa dall'area — vedi il docstring del modulo."""
-    suffix = source_url.split("?", 1)[0].split("#", 1)[0].lower()
-
-    if suffix.endswith(".pdf"):
-        content = fetch_pdf_bytes(source_url)
-        preview = pdf_text_preview(content)
-        tipo = classify.guess_doc_type(url=source_url, text_sample=preview)
-        logger.info(
-            "scaricato PDF autonomo %s (tipo=%s%s)",
-            source_url,
-            tipo,
-            f", comune={comune_id}" if comune_id else "",
-        )
-        return [
-            FetchedDoc(
-                url=source_url,
-                kind="pdf",
-                tipo=tipo,
-                content=content,
-                comune_id=comune_id,
-            )
-        ]
-
-    if suffix.endswith((".md", ".markdown")):
-        text = fetch_markdown_text(source_url)
-        tipo = classify.guess_doc_type(url=source_url, text_sample=text)
-        logger.info(
-            "scaricato Markdown autonomo %s (tipo=%s%s)",
-            source_url,
-            tipo,
-            f", comune={comune_id}" if comune_id else "",
-        )
-        return [
-            FetchedDoc(
-                url=source_url,
-                kind="markdown",
-                tipo=tipo,
-                content=text,
-                comune_id=comune_id,
-            )
-        ]
-
-    page = fetch_page(source_url)
-    docs: list[FetchedDoc] = []
-
-    tipo = classify.guess_doc_type(
-        url=source_url, title=page.title, text_sample=page.text_sample
-    )
-    docs.append(
-        FetchedDoc(
-            url=source_url,
-            kind="html",
-            tipo=tipo,
-            content=page.raw_html,
-            comune_id=comune_id,
-        )
-    )
+    Le frazioni arrivano da due fonti che si sommano: quelle dichiarate
+    in `[[frazioni]]` (perché hanno un nome leggibile o uno schema di
+    raccolta proprio) e quelle dedotte dalle cartelle sotto
+    `_calendari/<comune>/_frazioni/`. Una frazione che ha soltanto un
+    calendario diverso non ha bisogno di comparire nel manifest: la
+    cartella basta.
+    """
+    db.upsert_sub_ato(conn, area.id, area.nome, area.gestore)
     logger.info(
-        "scaricata pagina HTML %s (tipo=%s%s)",
-        source_url,
-        tipo,
-        f", comune={comune_id}" if comune_id else "",
+        "area registrata: %s (%r, gestore=%r)", area.id, area.nome, area.gestore
     )
 
-    pdf_bar = tqdm(page.pdf_links, desc="PDF", unit="doc")
-    for pdf_url in pdf_bar:
-        pdf_bar.set_postfix_str(knowledge.short(pdf_url))
-        try:
-            content = fetch_pdf_bytes(pdf_url)
-        except Exception as exc:
-            logger.warning("fetch PDF fallito %s: %s (salto e proseguo)", pdf_url, exc)
-            continue
-        # Anteprima leggera (poche pagine, pdfplumber) per classificare sul
-        # contenuto reale invece che solo sul nome file — spesso un
-        # codice criptico (es. "FRAZ-BARD-DONNAS.pdf") da cui è
-        # impossibile indovinare la categoria. Non è la vera estrazione
-        # per il RAG (quella resta compito di PDFPlumberLoader in
-        # loaders.py), solo un campione per orientare la classificazione.
-        preview = pdf_text_preview(content)
-        tipo = classify.guess_doc_type(url=pdf_url, text_sample=preview)
-        docs.append(
-            FetchedDoc(
-                url=pdf_url, kind="pdf", tipo=tipo, content=content, comune_id=comune_id
-            )
+    comuni_noti = {c.id for c in area.comuni}
+    for comune in area.comuni:
+        db.upsert_comune(conn, comune.id, comune.nome, area.id)
+        logger.info("comune registrato: %s (%r)", comune.id, comune.nome)
+
+    # Un calendario in una cartella di un comune non dichiarato è quasi
+    # sempre un refuso nel nome della cartella. Fermarsi qui evita di
+    # scrivere date che nessun utente raggiungerà mai.
+    ignoti = {c.comune_id for c in calendari} - comuni_noti
+    if ignoti:
+        raise manifest.ManifestError(
+            f"_calendari/ contiene cartelle per comuni non dichiarati in "
+            f"[[comuni]]: {', '.join(sorted(ignoti))}. Comuni dichiarati: "
+            f"{', '.join(sorted(comuni_noti))}."
         )
 
-    md_bar = tqdm(page.markdown_links, desc="Markdown", unit="doc")
-    for md_url in md_bar:
-        md_bar.set_postfix_str(knowledge.short(md_url))
-        try:
-            text = fetch_markdown_text(md_url)
-        except Exception as exc:
-            logger.warning(
-                "fetch Markdown fallito %s: %s (salto e proseguo)", md_url, exc
-            )
-            continue
-        tipo = classify.guess_doc_type(url=md_url, text_sample=text)
-        docs.append(
-            FetchedDoc(
-                url=md_url,
-                kind="markdown",
-                tipo=tipo,
-                content=text,
-                comune_id=comune_id,
-            )
-        )
-
-    return docs
+    frazioni: dict[tuple[str, str], str] = {
+        (c.comune_id, c.hamlet): c.hamlet for c in calendari if c.hamlet
+    }
+    for spec in area.frazioni:
+        frazioni[(spec.comune_id, spec.hamlet)] = spec.nome
+    for (comune_id, hamlet), nome in sorted(frazioni.items()):
+        dichiarata = area.frazione(comune_id, hamlet)
+        etichetta = dichiarata.nome if dichiarata else manifest.nome_leggibile(nome)
+        upsert_frazione(conn, comune_id, hamlet, etichetta)
+        logger.info("  frazione registrata: %s/%s (%r)", comune_id, hamlet, etichetta)
 
 
-def save_to_knowledge(
-    area_id: str, docs: list[FetchedDoc], manifest: dict[str, dict] | None = None
-) -> dict[str, dict]:
-    """Scrive su disco i documenti già scaricati da fetch_source —
-    condiviso dall'area (knowledge/<area_id>/<categoria>/) o
-    specifico di un comune
-    (knowledge/<area_id>/_comuni/<comune_id>/<categoria>/), a
-    seconda di doc.comune_id — aggiornando (in-place) il manifest
-    passato, o uno nuovo caricato da disco se non fornito. Non lo
-    persiste da sola: restituisce il manifest aggiornato, così
-    `fetch_to_knowledge` può accumulare più chiamate (una per URL) prima
-    di salvare una volta sola su disco."""
-    if manifest is None:
-        manifest = knowledge.load_manifest(area_id)
+def _log_gruppi_identici(calendari: list[knowledge.CalendarioTrovato]) -> None:
+    """Raggruppa i calendari per hash del contenuto e lo mostra a log.
 
-    for doc in docs:
-        filename = knowledge.sanitize_filename(doc.url, _EXT_BY_KIND[doc.kind])
-        file_path = knowledge.target_path(
-            area_id, doc.tipo, filename, comune_id=doc.comune_id
-        )
-        if isinstance(doc.content, bytes):
-            file_path.write_bytes(doc.content)
-        else:
-            file_path.write_text(doc.content, encoding="utf-8")
-        knowledge.register_file(
-            area_id,
-            manifest,
-            file_path,
-            doc.url,
-            doc.kind,
-            doc.tipo,
-            comune_id=doc.comune_id,
-        )
+    I calendari stanno in una cartella per comune, quindi lo stesso
+    semestre esiste in più copie quando più comuni condividono il
+    calendario (caso reale: Bard, Donnas e Hône). La duplicazione è il
+    prezzo di un layout in cui si trova il calendario di un comune
+    guardando la sua cartella; il rischio che porta è che una copia venga
+    aggiornata e le altre no, cosa che non dà nessun errore — dà un
+    comune che risponde con le date del semestre scorso.
 
-    return manifest
+    Mostrare i gruppi rende la divergenza visibile: finché Bard, Donnas e
+    Hône compaiono in un solo gruppo sono allineati, e il giorno in cui
+    ne compaiono due o è voluto o è il bug. Non è un controllo (non
+    sappiamo quali file *debbano* essere identici), è lo stesso dato
+    letto in un modo in cui l'anomalia salta all'occhio.
+    """
+    per_hash: dict[str, list[str]] = {}
+    for trovato in calendari:
+        digest = hashlib.sha256(trovato.path.read_bytes()).hexdigest()[:8]
+        per_hash.setdefault(digest, []).append(trovato.etichetta)
+
+    condivisi = {h: d for h, d in per_hash.items() if len(d) > 1}
+    if condivisi:
+        logger.info("calendari con contenuto identico:")
+        for digest, destinazioni in sorted(condivisi.items()):
+            logger.info("  [%s] %s", digest, ", ".join(sorted(destinazioni)))
 
 
-def fetch_to_knowledge(
-    area_id: str,
-    source_urls: list[str],
-    comune_urls: dict[str, list[str]] | None = None,
+def sync_calendari(
+    conn, area: manifest.AreaManifest, calendari: list[knowledge.CalendarioTrovato]
 ) -> int:
-    """Fetch di una o più fonti condivise dall'area (`source_urls`, un
-    giro di rete per URL) più, opzionalmente, fonti specifiche di
-    singoli comuni (`comune_urls`: comune_id -> lista di URL — es. il
-    calendario di raccolta di un comune, diverso da quello di un comune
-    vicino nella stessa area). Tutto finisce nella stessa cartella
-    knowledge/<area_id>/ (con o senza sottocartella _comuni/, a
-    seconda della fonte) e nello stesso manifest. Restituisce il numero
-    totale di file salvati."""
-    manifest: dict[str, dict] = {}
-    total = 0
+    """Carica in `raccolta_date` i calendari scoperti sotto
+    `_calendari/`, con lo schema di raccolta dichiarato nel manifest per
+    ciascuna destinazione."""
+    if not calendari:
+        logger.warning(
+            "nessun calendario sotto %s/: il tool del bot non avrà date da "
+            "restituire per quest'area",
+            knowledge.CALENDARI_SUBDIR,
+        )
+        return 0
 
-    for url in source_urls:
-        docs = fetch_source(url)
-        manifest = save_to_knowledge(area_id, docs, manifest=manifest)
-        total += len(docs)
+    _log_gruppi_identici(calendari)
 
-    for comune_id, urls in (comune_urls or {}).items():
-        for url in urls:
-            docs = fetch_source(url, comune_id=comune_id)
-            manifest = save_to_knowledge(area_id, docs, manifest=manifest)
-            total += len(docs)
+    # Raggruppati per destinazione: la mappatura dei materiali è per
+    # comune/frazione, le date sono per file, e la validazione ha bisogno
+    # di vedere tutti i semestri insieme (vedi carica_destinazione).
+    per_destinazione: dict[tuple[str, str], list[tuple[Path, str]]] = {}
+    for trovato in calendari:
+        per_destinazione.setdefault((trovato.comune_id, trovato.hamlet), []).append(
+            (trovato.path, trovato.source)
+        )
 
-    knowledge.save_manifest(area_id, manifest)
-    logger.info("fetch completato: %d file salvati in knowledge/%s/", total, area_id)
-    return total
+    totale = 0
+    barra = tqdm(sorted(per_destinazione.items()), desc="Calendari", unit="dest")
+    for (comune_id, hamlet), files in barra:
+        barra.set_postfix_str(f"{comune_id}/{hamlet}" if hamlet else comune_id)
+        totale += calendario_ingest.carica_destinazione(
+            conn,
+            comune_id,
+            hamlet,
+            files,
+            materiali=area.mappatura_per(comune_id, hamlet),
+            fonte=area.fonte_per(files[0][1]),
+        )
+
+    logger.info("calendari: %d righe scritte in raccolta_date", totale)
+    return totale
 
 
-def run_sub_ato(
-    sub_ato_id: str,
-    sub_ato_nome: str,
-    gestore: str,
-    comuni: list[ComuneInput],
-    source_urls: list[str],
+def sync_rag(
+    area: manifest.AreaManifest,
     database_url: str,
     embeddings: Embeddings,
-    comune_urls: dict[str, list[str]] | None = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    reset: bool = False,
 ) -> PGVector:
-    """Esegue la pipeline end-to-end per un'area Sub-ATO:
+    """Scoperta -> chunking -> embedding -> vector store, per una sola
+    area (una collection per area Sub-ATO: un gestore può servire più
+    aree con contenuti diversi, quindi l'area è la chiave giusta, non il
+    gestore)."""
+    docs = documents.discover(area.area_dir, area.id, fonti=area.fonte_per)
+    logger.info("%s: %d documenti trovati", area.id, len(docs))
 
-    0. INSERT/UPSERT dell'area e di ciascun comune che vi appartiene
-       (upsert, non serve che esistano già — vedi db.upsert_sub_ato,
-       db.upsert_comune)
-    1-4. fetch (fonti condivise dall'area + eventuali fonti specifiche
-         di un comune, vedi comune_urls) -> knowledge/<sub_ato_id>/ ->
-         load -> split -> scrittura su Postgres (collection isolata per
-         area, chunk taggati con comune_id quando pertinente)
-
-    Restituisce il vector store dell'area, pronto per essere interrogato
-    (vedi bot/rag.py per il filtro per comune in fase di retrieval, o il
-    notebook per un esempio diretto con `.similarity_search()`)."""
-    conn = db.connect(database_url)
-
-    db.upsert_sub_ato(conn, sub_ato_id, sub_ato_nome, gestore)
-    logger.info(
-        "area registrata in Postgres: %s (%r, gestore=%r)",
-        sub_ato_id,
-        sub_ato_nome,
-        gestore,
-    )
-
-    for c in comuni:
-        db.upsert_comune(conn, c.id, c.nome, sub_ato_id)
-        logger.info(
-            "comune registrato in Postgres: %s (%r) -> %s", c.id, c.nome, sub_ato_id
+    if not docs:
+        logger.warning(
+            "nessun documento RAG in %s: controlla che i Markdown siano dentro "
+            "una cartella di tipo (es. guide/), non nella radice dell'area",
+            area.area_dir,
         )
 
-    fetch_to_knowledge(sub_ato_id, source_urls, comune_urls=comune_urls)
+    per_tipo: dict[str, int] = {}
+    for doc in docs:
+        per_tipo[doc.metadata["tipo"]] = per_tipo.get(doc.metadata["tipo"], 0) + 1
+    for tipo, quanti in sorted(per_tipo.items()):
+        logger.info("  tipo=%-14s %d documenti", tipo, quanti)
 
-    documents = load_knowledge(sub_ato_id)
-    logger.info(
-        "%s: caricati %d documenti da knowledge/%s/",
-        sub_ato_id,
-        len(documents),
-        sub_ato_id,
-    )
+    chunks = split_documents(docs, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    logger.info("%s: %d chunk generati", area.id, len(chunks))
 
-    chunks = split_documents(
-        documents, chunk_size=chunk_size, chunk_overlap=chunk_overlap
-    )
-    logger.info("%s: %d chunk generati", sub_ato_id, len(chunks))
-
-    vectorstore = get_vectorstore(database_url, sub_ato_id, embeddings)
+    if reset:
+        logger.warning(
+            "--reset: svuoto la collection %s prima di riscriverla", area.id
+        )
+        vectorstore = reset_collection(database_url, area.id, embeddings)
+    else:
+        vectorstore = get_vectorstore(database_url, area.id, embeddings)
     ids = add_chunks(vectorstore, chunks)
     logger.info(
-        "%s: %d chunk scritti su Postgres (collection=%s)",
-        sub_ato_id,
-        len(ids),
-        sub_ato_id,
+        "%s: %d chunk scritti su Postgres (collection=%s)", area.id, len(ids), area.id
     )
-
     return vectorstore
+
+
+def run_area(
+    area: manifest.AreaManifest,
+    database_url: str,
+    embeddings: Embeddings | None = None,
+    con_rag: bool = True,
+    con_calendari: bool = True,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    reset: bool = False,
+) -> PGVector | None:
+    """Ingestion completa di un'area. `con_rag`/`con_calendari`
+    permettono di rifare solo una delle due metà: correggere una data in
+    un calendario non deve costare il ricalcolo degli embedding di tutta
+    l'area (minuti su GPU Pascal), e viceversa."""
+    calendari = knowledge.discover_calendari(area.area_dir)
+
+    conn = db.connect(database_url)
+    try:
+        registra_anagrafica(conn, area, calendari)
+        if con_calendari:
+            sync_calendari(conn, area, calendari)
+    finally:
+        conn.close()
+
+    if not con_rag:
+        return None
+
+    if embeddings is None:
+        raise ValueError("con_rag=True richiede un oggetto Embeddings")
+
+    return sync_rag(
+        area,
+        database_url,
+        embeddings,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        reset=reset,
+    )

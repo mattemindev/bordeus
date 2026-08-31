@@ -1,145 +1,163 @@
-"""Gestione della cartella locale `knowledge/`: dove i documenti scaricati
-vengono salvati prima di essere caricati con i loader di LangChain
-(step 2 della pipeline), e il manifest che ne registra i metadati
-originali (URL sorgente, tipo di file, categoria, comune specifico se
-presente).
+"""Convenzioni della cartella `knowledge/`: dove vivono i Markdown
+curati e come si deduce il loro `tipo`.
 
-Struttura:
+    knowledge/<area_id>/area.toml                       manifest dell'area
+    knowledge/<area_id>/<tipo>/*.md                     documenti RAG condivisi dall'area
+    knowledge/<area_id>/_comuni/<comune_id>/<tipo>/*.md documenti RAG di UN comune
+    knowledge/<area_id>/_calendari/<comune_id>/*.md     calendari (-> Postgres, non RAG)
+    knowledge/<area_id>/_calendari/<comune_id>/_frazioni/<hamlet>/*.md   override per frazione
 
-    knowledge/<area_id>/<categoria>/<file>                          # contenuto condiviso dall'area
-    knowledge/<area_id>/_comuni/<comune_id>/<categoria>/<file>     # contenuto specifico di un comune
-    knowledge/<area_id>/manifest.json                                # un solo manifest per l'area, entrambi i tipi di contenuto
+Il `tipo` è il nome della cartella che contiene il file. Nella versione
+precedente della pipeline era indovinato da un'euristica a parole chiave
+(`classify.py`, ora rimosso) perché i file arrivavano da un crawl e
+nessuno li aveva guardati. Ora ogni file è messo lì da chi cura i dati,
+che sa già cosa contiene: la cartella È la dichiarazione, e non può
+sbagliarsi come faceva l'euristica (che classificava "calendario" un
+vocabolario solo perché citava le parole "giorni di raccolta").
 
-`area_id` è lo id del Sub-ATO (es. "sub-ato-e"), non del singolo
-comune: un'area può coprire più comuni che condividono le stesse guide
-(vedi migrations/0002_sub_ato.sql) — una cartella per area tiene i dati
-di aree diverse separati fin dal filesystem, coerente con l'isolamento
-usato nel resto del progetto (una collection per area nel vector store).
+## Cartelle con underscore
 
-Non tutto il contenuto di un'area è però davvero condiviso: il
-calendario di raccolta porta a porta, ad esempio, può variare da un
-comune all'altro della stessa area per motivi logistici, anche se
-gestiti dalla stessa azienda (caso reale osservato con TeknoService
-Italia in Valle d'Aosta: Donnas e Pont-Saint-Martin, comuni confinanti
-nello stesso Sub-ATO E, hanno calendari diversi). Il contenuto
-specifico di un comune finisce quindi in una sottocartella dedicata
-(`_comuni/<comune_id>/`) e viene taggato nel manifest con il proprio
-`comune_id` — a differenza vuoto per il contenuto condiviso — così il
-bot può filtrare correttamente in fase di retrieval (vedi
-`bordeus_common.vectorstore.get_vectorstore`/`bot/rag.py`): un utente
-vede sempre il contenuto condiviso dell'area PIÙ quello specifico del
-proprio comune, mai quello di un comune vicino.
+`_comuni`, `_calendari`, `_frazioni`: l'underscore iniziale segnala
+"non è una cartella di tipo". La regola è generale — qualunque cartella
+il cui nome inizia per underscore viene saltata dalla scoperta dei
+documenti RAG — così aggiungere una cartella di servizio in futuro non
+la fa finire per sbaglio nel vector store con un `tipo` inventato.
+
+`_calendari` in particolare **deve** restare esclusa: il calendario non
+è più contenuto RAG, va in `raccolta_date` (vedi
+`bordeus_common.calendario`). Se finisse anche nel vector store, il
+modello avrebbe davanti sia la data corretta restituita dal tool sia un
+elenco di 50 date in testo libero da cui pescarne un'altra.
 """
 
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
 
 # Radice di knowledge/, sorella di src/ e notebooks/ dentro ingestion/.
 KNOWLEDGE_ROOT = Path(__file__).resolve().parents[2] / "knowledge"
 
-# Nome della sottocartella che ospita il contenuto specifico di un
-# comune, dentro knowledge/<area_id>/. Con underscore iniziale per
-# distinguerla a colpo d'occhio dalle cartelle di categoria
-# (calendario/guide/moduli/servizi/altro), che non hanno mai underscore.
-_COMUNI_SUBDIR = "_comuni"
+COMUNI_SUBDIR = "_comuni"
+FRAZIONI_SUBDIR = "_frazioni"
+CALENDARI_SUBDIR = "_calendari"
 
+MARKDOWN_SUFFIXES = (".md", ".markdown")
 
-@dataclass
-class ManifestEntry:
-    source_url: str
-    kind: str  # "html" | "pdf" | "markdown"
-    tipo: str  # categoria da classify.guess_doc_type
-    comune_id: str = (
-        ""  # vuoto = contenuto condiviso dall'area, altrimenti specifico di quel comune
-    )
+# Tipi previsti oggi, per un avviso quando ne compare uno diverso — non
+# un elenco chiuso: chi cura i dati può creare una cartella nuova (es.
+# "tariffe") e funziona senza toccare il codice. L'avviso serve solo a
+# far notare un refuso ("guie/" invece di "guide/"), che altrimenti
+# passerebbe come tipo valido e romperebbe i filtri di retrieval in
+# silenzio.
+TIPI_NOTI = frozenset(
+    {
+        "guide",
+        "vocabolario",
+        "categorie",
+        "info",
+        "info_generali",
+        "moduli",
+        "servizi",
+        "altro",
+    }
+)
 
 
 def area_dir(area_id: str) -> Path:
     return KNOWLEDGE_ROOT / area_id
 
 
-def tipo_dir(area_id: str, tipo: str, comune_id: str = "") -> Path:
-    """Cartella di categoria, per il contenuto condiviso dell'area
-    (comune_id vuoto, comportamento invariato) oppure per il
-    contenuto specifico di un comune (sotto _comuni/<comune_id>/)."""
-    if comune_id:
-        return area_dir(area_id) / _COMUNI_SUBDIR / comune_id / tipo
-    return area_dir(area_id) / tipo
+def resolve_area_dir(area: str) -> Path:
+    """Accetta sia un id di area (`sub-ato-e`, risolto sotto
+    `KNOWLEDGE_ROOT`) sia un percorso a una cartella — comodo per
+    lavorare su una copia fuori dal repo senza dover spostare file."""
+    candidato = Path(area)
+    if candidato.is_dir():
+        return candidato.resolve()
+    return area_dir(area)
+
+
+def is_service_dir(path: Path) -> bool:
+    """Cartella di servizio (underscore o punto iniziale), da saltare
+    nella scoperta dei documenti RAG."""
+    return path.name.startswith(("_", "."))
+
+
+@dataclass(frozen=True)
+class CalendarioTrovato:
+    """Un file di calendario e la destinazione dedotta dal suo percorso."""
+
+    path: Path
+    comune_id: str
+    hamlet: str  # "" = calendario dell'intero comune
+    source: str  # percorso relativo all'area: stabile, usato come chiave di ri-ingestione
+
+    @property
+    def etichetta(self) -> str:
+        return f"{self.comune_id}/{self.hamlet}" if self.hamlet else self.comune_id
+
+
+def discover_calendari(area_dir: Path) -> list[CalendarioTrovato]:
+    """Scopre i calendari da `_calendari/`, deducendo comune e frazione
+    dal percorso invece che da una dichiarazione nel manifest.
+
+        _calendari/<comune_id>/<periodo>.md
+        _calendari/<comune_id>/_frazioni/<hamlet>/<periodo>.md
+
+    Il percorso è il legame. Chi cura i dati apre la cartella del proprio
+    comune e ci trova i suoi calendari, senza dover incrociare un file di
+    configurazione — che era il difetto della versione precedente, dove i
+    calendari stavano in una cartella piatta e il legame con i comuni era
+    dichiarato altrove.
+    """
+    base = area_dir / CALENDARI_SUBDIR
+    if not base.is_dir():
+        return []
+
+    trovati: list[CalendarioTrovato] = []
+    for comune_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+        if comune_dir.name.startswith("."):
+            continue
+        comune_id = comune_dir.name
+
+        for file in sorted(comune_dir.glob("*")):
+            if file.is_file() and file.suffix.lower() in MARKDOWN_SUFFIXES:
+                trovati.append(
+                    CalendarioTrovato(
+                        path=file,
+                        comune_id=comune_id,
+                        hamlet="",
+                        source=str(file.relative_to(area_dir)),
+                    )
+                )
+
+        frazioni_dir = comune_dir / FRAZIONI_SUBDIR
+        if not frazioni_dir.is_dir():
+            continue
+        for hamlet_dir in sorted(p for p in frazioni_dir.iterdir() if p.is_dir()):
+            for file in sorted(hamlet_dir.glob("*")):
+                if file.is_file() and file.suffix.lower() in MARKDOWN_SUFFIXES:
+                    trovati.append(
+                        CalendarioTrovato(
+                            path=file,
+                            comune_id=comune_id,
+                            hamlet=hamlet_dir.name,
+                            source=str(file.relative_to(area_dir)),
+                        )
+                    )
+
+    return trovati
+
+
+def calendario_dir(area_dir: Path, comune_id: str, hamlet: str = "") -> Path:
+    """Cartella in cui va scritto il calendario di una destinazione —
+    usata dall'estrattore per creare le copie nel posto giusto."""
+    base = area_dir / CALENDARI_SUBDIR / comune_id
+    return base / FRAZIONI_SUBDIR / hamlet if hamlet else base
 
 
 def short(text: str, max_len: int = 50) -> str:
-    """Accorcia una stringa (tipicamente un URL) per la barra di
-    avanzamento, così non sfonda la larghezza del terminale."""
+    """Accorcia una stringa per la barra di avanzamento, così non sfonda
+    la larghezza del terminale."""
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
-
-
-def sanitize_filename(url: str, default_ext: str) -> str:
-    """Deriva un nome file sicuro dall'URL, distintivo abbastanza da non
-    collidere tra fonti diverse dello stesso Sub-ATO: da quando
-    l'ingestion supporta più URL per area (es. una pagina specifica +
-    un vocabolario condiviso), due URL che terminano entrambi con "/"
-    genererebbero altrimenti lo stesso "index.html" — se finissero
-    anche nella stessa categoria, il secondo sovrascriverebbe il primo
-    in silenzio (bug reale trovato testando il caso multi-URL: due path
-    "/category/subato-d/" e "/vocabolario/" collidevano). Per questo
-    usiamo tutti i segmenti del path, non solo l'ultimo."""
-    parsed = urlparse(url)
-    segments = [s for s in parsed.path.split("/") if s]
-    stem = "-".join(segments) if segments else parsed.netloc.replace(".", "-")
-    name = re.sub(r"[^A-Za-z0-9._-]", "-", stem)
-    if not name.lower().endswith(default_ext.lower()):
-        name = f"{name}{default_ext}"
-    return name
-
-
-def target_path(area_id: str, tipo: str, filename: str, comune_id: str = "") -> Path:
-    """Percorso di destinazione per un file, creando la cartella se
-    manca. Sovrascrive sempre in caso di ri-esecuzione (coerente con
-    l'idempotenza usata altrove nella pipeline: una re-ingestion
-    aggiorna, non accumula copie)."""
-    directory = tipo_dir(area_id, tipo, comune_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / filename
-
-
-def manifest_path(area_id: str) -> Path:
-    return area_dir(area_id) / "manifest.json"
-
-
-def load_manifest(area_id: str) -> dict[str, dict]:
-    path = manifest_path(area_id)
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def save_manifest(area_id: str, manifest: dict[str, dict]) -> None:
-    path = manifest_path(area_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-
-
-def register_file(
-    area_id: str,
-    manifest: dict[str, dict],
-    file_path: Path,
-    source_url: str,
-    kind: str,
-    tipo: str,
-    comune_id: str = "",
-) -> None:
-    """Aggiunge (o aggiorna) una entry del manifest per un file appena
-    salvato. Muta `manifest` in-place; il chiamante decide quando
-    persisterlo su disco con save_manifest (tipicamente una volta sola,
-    a fine crawl, non ad ogni singolo file)."""
-    rel = str(file_path.relative_to(area_dir(area_id)))
-    manifest[rel] = asdict(
-        ManifestEntry(source_url=source_url, kind=kind, tipo=tipo, comune_id=comune_id)
-    )
