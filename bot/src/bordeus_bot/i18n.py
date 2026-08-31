@@ -17,6 +17,10 @@ messaggi statici di questo modulo.
 
 from __future__ import annotations
 
+from bordeus_common.log import get_logger
+
+logger = get_logger("bordeus_bot")
+
 # Il bot è pensato per la Valle d'Aosta: l'italiano è il fallback
 # naturale se il client Telegram non dichiara una lingua, o dichiara una
 # lingua che non abbiamo tradotto qui sotto.
@@ -108,6 +112,17 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "es": "No he podido determinar el municipio a partir de la ubicación. Intenta escribirme directamente el nombre del municipio.",
         "de": "Ich konnte die Gemeinde anhand des Standorts nicht ermitteln. Versuch, mir den Namen der Gemeinde direkt zu schreiben.",
     },
+    # Usata dal gestore d'errore di handle_confirmation. Mancava: `t()`
+    # sollevava KeyError proprio mentre stava gestendo un errore, quindi
+    # l'utente non vedeva niente e nel log compariva "anche il messaggio
+    # di errore è fallito" senza il motivo vero.
+    "confirmation_error": {
+        "it": "Qualcosa è andato storto nel salvare il comune. Riprova con /comune.",
+        "fr": "Un problème est survenu lors de l'enregistrement de la commune. Réessaie avec /comune.",
+        "en": "Something went wrong while saving your municipality. Try again with /comune.",
+        "es": "Algo salió mal al guardar el municipio. Inténtalo de nuevo con /comune.",
+        "de": "Beim Speichern der Gemeinde ist etwas schiefgelaufen. Versuch es erneut mit /comune.",
+    },
     "generic_error": {
         "it": "Si è verificato un errore, riprova tra poco.",
         "fr": "Une erreur s'est produite, réessaie dans un instant.",
@@ -157,19 +172,17 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "es": "De acuerdo, inténtalo de nuevo: comparte tu ubicación o escríbeme el nombre de tu municipio.",
         "de": "Okay, versuch es noch einmal: Teile deinen Standort oder schreib mir den Namen deiner Gemeinde.",
     },
+    # Solo la conferma, nient'altro: le istruzioni su cosa fare adesso
+    # stanno in "ready_message"/"group_ready", che è il messaggio subito
+    # successivo (deve esistere comunque, per togliere la tastiera della
+    # posizione — vedi telegram_bot.handle_confirmation). Averle in
+    # entrambi significava mandare due volte di fila la stessa cosa.
     "confirm_yes_response": {
-        "it": 'Perfetto, comune impostato su {nome}. Ora mandami una foto o descrivi l\'oggetto che vuoi buttare (es. "lattina di alluminio") e ti dico come conferirlo.\n\nPer cambiare comune in futuro, manda /comune.',
-        "fr": "Parfait, commune définie sur {nome}. Envoie-moi maintenant une photo ou décris l'objet que tu veux jeter (ex. « canette en aluminium ») et je te dirai comment le trier.\n\nPour changer de commune plus tard, envoie /comune.",
-        "en": 'Great, comune set to {nome}. Now send me a photo or describe the item you want to dispose of (e.g. "aluminum can") and I\'ll tell you how to sort it.\n\nTo change comune later, send /comune.',
-        "es": 'Perfecto, municipio configurado en {nome}. Ahora envíame una foto o describe el objeto que quieres desechar (p. ej. "lata de aluminio") y te diré cómo hacerlo.\n\nPara cambiar de municipio más adelante, envía /comune.',
-        "de": 'Perfekt, Gemeinde auf {nome} eingestellt. Schick mir jetzt ein Foto oder beschreib den Gegenstand, den du entsorgen möchtest (z. B. "Aludose"), und ich sage dir, wie du ihn entsorgst.\n\nUm später die Gemeinde zu ändern, sende /comune.',
-    },
-    "confirmation_error": {
-        "it": "Si è verificato un errore, riprova con /start.",
-        "fr": "Une erreur s'est produite, réessaie avec /start.",
-        "en": "Something went wrong, please try again with /start.",
-        "es": "Se ha producido un error, inténtalo de nuevo con /start.",
-        "de": "Es ist ein Fehler aufgetreten, versuch es erneut mit /start.",
+        "it": "✅ Comune impostato: {nome}.",
+        "fr": "✅ Commune définie : {nome}.",
+        "en": "✅ Municipality set: {nome}.",
+        "es": "✅ Municipio configurado: {nome}.",
+        "de": "✅ Gemeinde eingestellt: {nome}.",
     },
     "your_comune_fallback": {
         "it": "il tuo comune",
@@ -192,19 +205,152 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "es": "No he podido analizar la foto, inténtalo de nuevo.",
         "de": "Ich konnte das Foto nicht analysieren, versuch es noch einmal.",
     },
+    # --- messaggio di attesa, aggiornato a fasi -----------------------
+    # Descrivono cosa succede per l'utente, non nel programma: niente
+    # "retrieval", "embedding" o nomi di modelli. Vedi ui.Progress.
     "waiting_text": {
-        "it": "🔎 Un attimo, sto controllando le guide del tuo comune...",
-        "fr": "🔎 Un instant, je consulte les guides de votre commune...",
-        "en": "🔎 One moment, checking your municipality's guides...",
-        "es": "🔎 Un momento, estoy revisando las guías de tu municipio...",
-        "de": "🔎 Einen Moment, ich prüfe die Unterlagen deiner Gemeinde...",
+        "it": "📖 Sto leggendo il tuo messaggio...",
+        "fr": "📖 Je lis ton message...",
+        "en": "📖 Reading your message...",
+        "es": "📖 Estoy leyendo tu mensaje...",
+        "de": "📖 Ich lese deine Nachricht...",
     },
     "waiting_photo": {
-        "it": "📷 Un attimo, sto analizzando la foto...",
-        "fr": "📷 Un instant, j'analyse la photo...",
-        "en": "📷 One moment, analyzing the photo...",
-        "es": "📷 Un momento, estoy analizando la foto...",
-        "de": "📷 Einen Moment, ich analysiere das Foto...",
+        "it": "📷 Sto guardando la foto...",
+        "fr": "📷 Je regarde la photo...",
+        "en": "📷 Looking at the photo...",
+        "es": "📷 Estoy mirando la foto...",
+        "de": "📷 Ich schaue mir das Foto an...",
+    },
+    # Mostra l'oggetto riconosciuto: è l'informazione più utile durante
+    # l'attesa, perché è anche il punto in cui il bot può sbagliare — se
+    # ha capito male, l'utente lo vede subito invece che dopo una
+    # risposta inutile.
+    "waiting_identified": {
+        "it": "🔎 Ho capito: {oggetto}\nCerco come si smaltisce a {comune}...",
+        "fr": "🔎 J'ai compris : {oggetto}\nJe cherche comment le jeter à {comune}...",
+        "en": "🔎 Got it: {oggetto}\nLooking up how to dispose of it in {comune}...",
+        "es": "🔎 Entendido: {oggetto}\nBuscando cómo desecharlo en {comune}...",
+        "de": "🔎 Verstanden: {oggetto}\nIch suche, wie man das in {comune} entsorgt...",
+    },
+    "waiting_identified_no_comune": {
+        "it": "🔎 Ho capito: {oggetto}\nCerco come si smaltisce...",
+        "fr": "🔎 J'ai compris : {oggetto}\nJe cherche comment le jeter...",
+        "en": "🔎 Got it: {oggetto}\nLooking up how to dispose of it...",
+        "es": "🔎 Entendido: {oggetto}\nBuscando cómo desecharlo...",
+        "de": "🔎 Verstanden: {oggetto}\nIch suche, wie man das entsorgt...",
+    },
+    # --- fine onboarding: toglie la tastiera della posizione ----------
+    "ready_message": {
+        "it": "Tutto pronto. 👋\n\nMandami la foto di un oggetto, oppure scrivimi cos'è (es. \"una tazzina rotta\"), e ti dico dove va e quando passa la raccolta.\n\nPer cambiare comune: /comune",
+        "fr": "Tout est prêt. 👋\n\nEnvoie-moi la photo d'un objet, ou écris-moi ce que c'est (ex. « une tasse cassée »), et je te dis où le jeter et quand a lieu la collecte.\n\nPour changer de commune : /comune",
+        "en": "All set. 👋\n\nSend me a photo of an object, or just describe it (e.g. \"a broken mug\"), and I'll tell you where it goes and when it's collected.\n\nTo change municipality: /comune",
+        "es": "Todo listo. 👋\n\nMándame la foto de un objeto, o escríbeme qué es (p. ej. «una taza rota»), y te digo dónde va y cuándo pasa la recogida.\n\nPara cambiar de municipio: /comune",
+        "de": "Alles bereit. 👋\n\nSchick mir ein Foto eines Gegenstands oder beschreib ihn (z. B. „eine kaputte Tasse\"), und ich sage dir, wohin er gehört und wann die Abholung ist.\n\nGemeinde ändern: /comune",
+    },
+    # --- aiuto e uso nei gruppi ---------------------------------------
+    "help_text": {
+        "it": "Ti dico come smaltire un oggetto nel tuo comune, in Valle d'Aosta.\n\n• Mandami una **foto** dell'oggetto\n• Oppure scrivimi cos'è: \"una tazzina rotta\"\n\nComandi:\n/comune — imposta o cambia il comune\n/rifiuti <oggetto> — chiedi in un gruppo\n/help — questo messaggio\n\nIn un gruppo, scrivimi menzionandomi oppure usa /rifiuti.\nIn qualsiasi chat puoi scrivere @{bot} seguito dall'oggetto.",
+        "fr": "Je te dis comment jeter un objet dans ta commune, en Vallée d'Aoste.\n\n• Envoie-moi une **photo** de l'objet\n• Ou écris ce que c'est : « une tasse cassée »\n\nCommandes :\n/comune — définir ou changer de commune\n/rifiuti <objet> — demander dans un groupe\n/help — ce message\n\nDans un groupe, mentionne-moi ou utilise /rifiuti.\nDans n'importe quelle discussion, tape @{bot} suivi de l'objet.",
+        "en": "I tell you how to dispose of something in your municipality, in Aosta Valley.\n\n• Send me a **photo** of the object\n• Or describe it: \"a broken mug\"\n\nCommands:\n/comune — set or change your municipality\n/rifiuti <object> — ask in a group\n/help — this message\n\nIn a group, mention me or use /rifiuti.\nIn any chat, type @{bot} followed by the object.",
+        "es": "Te digo cómo desechar un objeto en tu municipio, en el Valle de Aosta.\n\n• Mándame una **foto** del objeto\n• O escribe qué es: «una taza rota»\n\nComandos:\n/comune — fijar o cambiar de municipio\n/rifiuti <objeto> — preguntar en un grupo\n/help — este mensaje\n\nEn un grupo, menciónarme o usa /rifiuti.\nEn cualquier chat, escribe @{bot} seguido del objeto.",
+        "de": "Ich sage dir, wie du etwas in deiner Gemeinde im Aostatal entsorgst.\n\n• Schick mir ein **Foto** des Gegenstands\n• Oder beschreib ihn: „eine kaputte Tasse\"\n\nBefehle:\n/comune — Gemeinde festlegen oder ändern\n/rifiuti <Gegenstand> — in einer Gruppe fragen\n/help — diese Nachricht\n\nErwähne mich in einer Gruppe oder nutze /rifiuti.\nIn jedem Chat: @{bot} gefolgt vom Gegenstand.",
+    },
+    "group_start_prompt": {
+        "it": "Ciao! Per rispondere in questo gruppo devo sapere di quale comune si parla.\n\nScrivimi il nome del comune (es. \"Donnas\").",
+        "fr": "Bonjour ! Pour répondre dans ce groupe, j'ai besoin de savoir de quelle commune il s'agit.\n\nÉcris-moi le nom de la commune (ex. « Donnas »).",
+        "en": "Hi! To answer in this group I need to know which municipality it refers to.\n\nType the name of the comune (e.g. \"Donnas\").",
+        "es": "¡Hola! Para responder en este grupo necesito saber de qué municipio se trata.\n\nEscríbeme el nombre del municipio (p. ej. «Donnas»).",
+        "de": "Hallo! Um in dieser Gruppe zu antworten, muss ich wissen, um welche Gemeinde es geht.\n\nSchreib mir den Namen der Gemeinde (z. B. „Donnas\").",
+    },
+    # Non ripete il nome del comune: l'ha appena detto la conferma. Dice
+    # invece l'unica cosa che in un gruppo non è ovvia — che il bot
+    # risponde solo se interpellato.
+    "group_ready": {
+        "it": "In un gruppo rispondo solo se mi interpelli: menzionami, oppure usa /rifiuti <oggetto>.",
+        "fr": "Dans un groupe, je réponds seulement si tu m'interpelles : mentionne-moi, ou utilise /rifiuti <objet>.",
+        "en": "In a group I only reply when addressed: mention me, or use /rifiuti <object>.",
+        "es": "En un grupo solo respondo si me interpelas: menciónarme, o usa /rifiuti <objeto>.",
+        "de": "In einer Gruppe antworte ich nur, wenn du mich ansprichst: erwähne mich oder nutze /rifiuti <Gegenstand>.",
+    },
+    "rifiuti_needs_argument": {
+        "it": "Scrivi cosa vuoi smaltire dopo il comando, per esempio:\n/rifiuti una tazzina rotta",
+        "fr": "Écris ce que tu veux jeter après la commande, par exemple :\n/rifiuti une tasse cassée",
+        "en": "Write what you want to dispose of after the command, for example:\n/rifiuti a broken mug",
+        "es": "Escribe qué quieres desechar después del comando, por ejemplo:\n/rifiuti una taza rota",
+        "de": "Schreib nach dem Befehl, was du entsorgen willst, zum Beispiel:\n/rifiuti eine kaputte Tasse",
+    },
+    # --- modalità inline (@bot ... da qualsiasi chat) ------------------
+    "inline_hint_title": {
+        "it": "Scrivi cosa vuoi smaltire",
+        "fr": "Écris ce que tu veux jeter",
+        "en": "Type what you want to dispose of",
+        "es": "Escribe qué quieres desechar",
+        "de": "Schreib, was du entsorgen willst",
+    },
+    "inline_hint_description": {
+        "it": "Per esempio: una tazzina rotta, una bottiglia di plastica...",
+        "fr": "Par exemple : une tasse cassée, une bouteille en plastique...",
+        "en": "For example: a broken mug, a plastic bottle...",
+        "es": "Por ejemplo: una taza rota, una botella de plástico...",
+        "de": "Zum Beispiel: eine kaputte Tasse, eine Plastikflasche...",
+    },
+    "inline_not_onboarded_title": {
+        "it": "Prima devi dirmi il tuo comune",
+        "fr": "Dis-moi d'abord ta commune",
+        "en": "First tell me your municipality",
+        "es": "Primero dime tu municipio",
+        "de": "Sag mir zuerst deine Gemeinde",
+    },
+    "inline_not_onboarded_description": {
+        "it": "Apri la chat con me e manda /start",
+        "fr": "Ouvre la discussion avec moi et envoie /start",
+        "en": "Open the chat with me and send /start",
+        "es": "Abre el chat conmigo y envía /start",
+        "de": "Öffne den Chat mit mir und sende /start",
+    },
+    "inline_answer_title": {
+        "it": "Come smaltire: {oggetto}",
+        "fr": "Comment jeter : {oggetto}",
+        "en": "How to dispose of: {oggetto}",
+        "es": "Cómo desechar: {oggetto}",
+        "de": "Entsorgung von: {oggetto}",
+    },
+    "inline_not_recognized_title": {
+        "it": "Non ho riconosciuto un oggetto",
+        "fr": "Je n'ai pas reconnu d'objet",
+        "en": "I didn't recognise an object",
+        "es": "No he reconocido ningún objeto",
+        "de": "Ich habe keinen Gegenstand erkannt",
+    },
+    # --- fonte e correzione dell'oggetto ------------------------------
+    "fonte_label": {
+        "it": "Fonte:",
+        "fr": "Source :",
+        "en": "Source:",
+        "es": "Fuente:",
+        "de": "Quelle:",
+    },
+    "fonti_label": {
+        "it": "Fonti:",
+        "fr": "Sources :",
+        "en": "Sources:",
+        "es": "Fuentes:",
+        "de": "Quellen:",
+    },
+    "correggi_button": {
+        "it": "✏️ Non è questo",
+        "fr": "✏️ Ce n'est pas ça",
+        "en": "✏️ That's not it",
+        "es": "✏️ No es esto",
+        "de": "✏️ Das ist es nicht",
+    },
+    "correggi_prompt": {
+        "it": "Scrivimi tu cos'è, con parole tue — userò esattamente quello che scrivi, senza provare a interpretarlo.",
+        "fr": "Dis-moi toi ce que c'est, avec tes mots — j'utiliserai exactement ce que tu écris, sans essayer de l'interpréter.",
+        "en": "Tell me what it is in your own words — I'll use exactly what you write, without trying to interpret it.",
+        "es": "Dime tú qué es, con tus palabras — usaré exactamente lo que escribas, sin intentar interpretarlo.",
+        "de": "Sag mir mit deinen Worten, was es ist — ich nehme genau das, was du schreibst, ohne es zu deuten.",
     },
 }
 
@@ -226,7 +372,17 @@ def t(message_id: str, language_code: str | None, **kwargs: str) -> str:
     nel template con `str.format()` (es. `t("comune_not_supported", lc,
     nome="Cogne")`)."""
     lang = normalize_language(language_code)
-    template = _MESSAGES[message_id][lang]
+    voce = _MESSAGES.get(message_id)
+    if voce is None:
+        # Non solleva: `t()` viene chiamata anche dentro i gestori
+        # d'errore, e un KeyError lì sostituisce un problema
+        # diagnosticabile con un silenzio (l'utente non riceve niente e
+        # il log mostra solo il fallimento del messaggio d'errore). Meglio
+        # un testo generico e una riga di log che dica quale chiave manca.
+        logger.error("chiave di traduzione mancante: %r", message_id)
+        voce = _MESSAGES["generic_error"]
+        kwargs = {}
+    template = voce.get(lang) or voce[DEFAULT_LANGUAGE]
     return template.format(**kwargs) if kwargs else template
 
 
