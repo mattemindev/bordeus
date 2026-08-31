@@ -1,195 +1,364 @@
-"""bordeus_ingest: pipeline di ingestion RAG per bordeus, costruita
-attorno a LangChain.
+"""bordeus_ingest: ingestion semi-automatica della knowledge base di
+bordeus.
 
-Scarica pagine HTML e i PDF/Markdown linkati in una cartella locale
-knowledge/<sub_ato_id>/<categoria>/, li carica con i loader di
-LangChain (`BSHTMLLoader`/`PDFPlumberLoader` per HTML/PDF, `TextLoader`
-per Markdown — vedi
-loaders.py), li spezza in chunk con MarkdownTextSplitter e li scrive su
-Postgres/pgvector tramite l'integrazione langchain-postgres. Gli
-embedding sono raggruppati per **area Sub-ATO** (`sub_ato_id`), non per
-comune: un gestore può servire più aree con contenuti diversi (es.
-Quendoz, Valle d'Aosta, gestisce sia il Sub-ATO C sia il D con pagine
-guida separate) — l'area, non il gestore, è la chiave giusta. L'ingestion
-fa l'upsert dell'area e di ciascun comune che vi appartiene, non serve
-più che esistano già.
+## Com'è cambiata rispetto alla v0.1.0
 
-Il wrapper del modello di embedding e la scrittura sul vector store
-(`embed.py`/`vectorstore.py` nella prima versione di questo pacchetto)
-non sono più qui: vivono in `bordeus_common`, condivisi con il bot —
-vedi `bordeus_common.embed`/`bordeus_common.vectorstore`.
+La prima versione era una pipeline automatica: scaricava le pagine del
+gestore, ne seguiva i link a PDF, indovinava una categoria con
+un'euristica a parole chiave e caricava tutto nel vector store. Il
+problema non era la meccanica ma il risultato: il contenuto che conta —
+il vocabolario oggetto/categoria, i calendari — vive in tabelle e in
+griglie a colori, e un'estrazione automatica ne perde l'allineamento.
+Serviva comunque riscrivere tutto a mano, quindi l'automazione non
+risparmiava il lavoro che contava: produceva solo una bozza scadente da
+buttare.
 
-Non tutto il contenuto di un'area è condiviso da tutti i comuni che la
-compongono: il calendario di raccolta porta a porta, ad esempio, può
-variare da un comune all'altro anche sotto lo stesso gestore (caso
-reale: TeknoService Italia, Sub-ATO E, Donnas e Pont-Saint-Martin hanno
-calendari diversi pur essendo comuni confinanti nella stessa area).
-`--comune-url` (ripetibile) ingerisce una fonte specifica di un comune
-— il contenuto resta nella stessa collection dell'area, ma taggato con
-`comune_id` nel metadata dei chunk, così il bot filtra correttamente
-in fase di retrieval (vedi `bordeus_common.vectorstore`, `bot/rag.py`).
+Ora il flusso è in tre passaggi, con una persona nel mezzo:
 
-Lo schema Postgres scritto qui (gestito da `langchain-postgres`) è letto
-direttamente dal bot Python (`bot/src/bordeus_bot/`) tramite la stessa
-integrazione — nessun secondo schema da tenere allineato.
+1. **`extract-*`** — un estrattore legge la fonte del gestore (PDF del
+   riciclabolario, immagine del calendario) e produce Markdown sotto
+   `knowledge/`. Si lancia quando il gestore pubblica una revisione, non
+   ad ogni ingestion.
+2. **rilettura umana** — il Markdown si corregge a mano. È il passaggio
+   che rende "semi" la semi-automazione, ed è il motivo per cui il
+   formato di scambio è Markdown e non JSON.
+3. **`sync`** — porta i Markdown in Postgres: i documenti nel vector
+   store, i calendari in `raccolta_date`.
+
+## Il calendario non è più contenuto RAG
+
+Le date di raccolta vanno in una tabella relazionale, non nel vector
+store, e il bot le legge tramite tool calling invece che dal contesto.
+Un elenco di 50 date in un chunk di testo è la forma peggiore possibile
+per la domanda che gli utenti fanno davvero ("quando passano?"): il
+modello deve confrontare date leggendole dal prompt, e quando sbaglia
+sbaglia in modo plausibile. Vedi `bordeus_common.calendario`.
+
+## Comandi
+
+    # ingestion completa di un'area (guidata dal manifest area.toml)
+    uv run bordeus-ingest sync --area=sub-ato-e
+
+    # solo i calendari (veloce: nessun embedding da ricalcolare)
+    uv run bordeus-ingest sync --area=sub-ato-e --only=calendari
+
+    # estrazione di una fonte nuova -> Markdown da rileggere
+    uv run bordeus-ingest extract-vocabolario \\
+        --pdf=https://www.teknoserviceitalia.com/.../riciclabolario.pdf \\
+        --out=knowledge/sub-ato-e/guide
+    # una sola estrazione, scritta nella cartella di ogni comune a cui si applica
+    uv run bordeus-ingest extract-calendario \\
+        --image=fonti/BARD-DONNAS-HONE.jpeg --area=sub-ato-e \\
+        --comuni=bard,donnas,hone --periodo=2026_semestre_2
+
+    uv run bordeus-ingest extract-calendario \\
+        --image=fonti/FRAZ-BARD-DONNAS.jpeg --area=sub-ato-e \\
+        --frazioni=donnas/albard,donnas/bondon,donnas/les_pians,bard/crous \\
+        --periodo=2026_semestre_2
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import sys
+from pathlib import Path
 
 from bordeus_common.embed import DEFAULT_MODEL_NAME, EMBEDDING_DIM, get_embeddings
+from bordeus_common.log import get_logger, setup_logging
 from dotenv import load_dotenv
 
-from . import viz
-from .pipeline import ComuneInput, run_sub_ato
+from . import knowledge, manifest, pipeline, viz
+from .pipeline import run_area
 
 __all__ = [
     "DEFAULT_MODEL_NAME",
     "EMBEDDING_DIM",
-    "ComuneInput",
     "get_embeddings",
-    "run_sub_ato",
+    "knowledge",
+    "manifest",
+    "pipeline",
+    "run_area",
     "viz",
 ]
 
+logger = get_logger("bordeus_ingest")
 
-def _parse_id_nome_arg(flag: str, value: str) -> tuple[str, str]:
-    """Formato atteso: 'id:Nome' (es. 'sub-ato-e:Sub-ATO E — Mont-Rose
-    e Walser'). Se manca ':' usiamo il valore anche come nome, così un
-    uso rapido con un solo elemento funziona comunque, senza richiedere
-    sempre il formato completo."""
-    raw_id, sep, nome = value.partition(":")
-    raw_id = raw_id.strip()
-    nome = nome.strip() if sep else raw_id
-    if not raw_id:
-        raise argparse.ArgumentTypeError(
-            f"{flag} non valido: {value!r} (atteso 'id:Nome')"
+
+def _database_url() -> str:
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print("DATABASE_URL non impostata", file=sys.stderr)
+        raise SystemExit(1)
+    return url
+
+
+def _parse_materiali_map(value: str | None) -> dict[str, str] | None:
+    """Formato: 'Umido=organico,Carta=carta'. None (flag assente) = mappa
+    di default del gestore TeknoService, vedi extract/vocabolario.py."""
+    if not value:
+        return None
+    mappa: dict[str, str] = {}
+    for coppia in value.split(","):
+        chiave, sep, valore = coppia.partition("=")
+        if not sep:
+            raise argparse.ArgumentTypeError(
+                f"--materiali-map non valida vicino a {coppia!r} "
+                "(atteso 'Da=A,Da2=A2')"
+            )
+        mappa[chiave.strip()] = valore.strip()
+    return mappa
+
+
+def _cmd_sync(args: argparse.Namespace) -> None:
+    database_url = _database_url()
+    area = pipeline.load_manifest(args.area)
+
+    con_rag = args.only in ("all", "rag")
+    con_calendari = args.only in ("all", "calendari")
+
+    # get_embeddings carica il modello e ne verifica la dimensione: costa
+    # secondi e VRAM, quindi lo costruiamo solo se serve davvero.
+    embeddings = get_embeddings(args.model) if con_rag else None
+
+    run_area(
+        area,
+        database_url,
+        embeddings=embeddings,
+        con_rag=con_rag,
+        con_calendari=con_calendari,
+        reset=args.reset,
+    )
+
+
+def _cmd_extract_vocabolario(args: argparse.Namespace) -> None:
+    from .extract import vocabolario
+
+    scritti = vocabolario.run(
+        args.pdf,
+        Path(args.out),
+        materiali_map=_parse_materiali_map(args.materiali_map),
+    )
+    print(f"\n{len(scritti)} file scritti in {args.out}")
+    print(
+        "Rileggili prima di eseguire 'sync': le voci con nota e quelle non "
+        "mappate sono i punti in cui l'estrazione sbaglia più spesso. Se "
+        "nell'area qualche comune o frazione divide carta e cartone, "
+        "riclassifica a mano come 'cartone' le voci che il riciclabolario "
+        "mette sotto 'Carta' (scatole, imballaggi, cassette della frutta)."
+    )
+
+
+def _parse_destinazioni(args: argparse.Namespace) -> list[Path]:
+    """Destinazioni di un calendario estratto: `--out` esplicito, oppure
+    `--comuni`/`--frazioni` risolti nella struttura di `_calendari/`."""
+    if args.out:
+        return [Path(args.out)]
+
+    if not args.area:
+        raise SystemExit(
+            "serve --out oppure --area insieme a --comuni/--frazioni "
+            "(con --area le destinazioni sono calcolate dalla struttura di "
+            "_calendari/, così non devi copiare i file a mano)"
         )
-    return raw_id, nome
 
+    area_dir = knowledge.resolve_area_dir(args.area)
+    nome = args.periodo if args.periodo.endswith(".md") else f"{args.periodo}.md"
 
-def _parse_comune_arg(value: str) -> ComuneInput:
-    comune_id, nome = _parse_id_nome_arg("--comune", value)
-    return ComuneInput(id=comune_id, nome=nome)
-
-
-def _parse_comune_url_arg(value: str) -> tuple[str, str]:
-    """Formato atteso: 'id:url' (es.
-    'donnas:https://x.it/calendario-donnas.pdf') — a differenza di
-    --sub-ato/--comune, qui i due punti separano id e URL, non id e
-    nome: un URL può contenere altri ':' (es. 'https://'), quindi il
-    partition avviene sul PRIMO ':' incontrato, non l'ultimo."""
-    comune_id, sep, url = value.partition(":")
-    comune_id = comune_id.strip()
-    url = url.strip()
-    if not sep or not comune_id or not url:
-        raise argparse.ArgumentTypeError(
-            f"--comune-url non valido: {value!r} (atteso 'id:url', es. 'donnas:https://...')"
+    destinazioni: list[Path] = []
+    for comune_id in _lista(args.comuni):
+        destinazioni.append(knowledge.calendario_dir(area_dir, comune_id) / nome)
+    for coppia in _lista(args.frazioni):
+        comune_id, sep, hamlet = coppia.partition("/")
+        if not sep:
+            raise SystemExit(
+                f"--frazioni: {coppia!r} non valida, attesa la forma "
+                "'comune/frazione' (es. donnas/albard)"
+            )
+        destinazioni.append(
+            knowledge.calendario_dir(area_dir, comune_id, hamlet) / nome
         )
-    return comune_id, url
+
+    if not destinazioni:
+        raise SystemExit("nessuna destinazione: usa --comuni e/o --frazioni")
+    return destinazioni
+
+
+def _lista(value: str | None) -> list[str]:
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
+def _cmd_extract_calendario(args: argparse.Namespace) -> None:
+    from .extract import calendario
+
+    destinazioni = _parse_destinazioni(args)
+    scritti = calendario.run(
+        Path(args.image),
+        destinazioni,
+        model=args.model,
+        base_url=args.base_url,
+    )
+    print(f"\n{len(scritti)} file scritti:")
+    for path in scritti:
+        print(f"  {path}")
+    print(
+        "\nRileggili prima di eseguire 'sync'. Il legame con i comuni è già "
+        "dato dal percorso: non c'è niente da dichiarare in area.toml, se non "
+        "lo schema di raccolta ('materiali') quando questo calendario ne usa "
+        "uno diverso da quello del comune."
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bordeus-ingest",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="comando", required=True)
+
+    p_sync = sub.add_parser(
+        "sync",
+        help="porta i Markdown curati di un'area in Postgres (vector store + calendari)",
+    )
+    p_sync.add_argument(
+        "--area",
+        required=True,
+        metavar="ID|PERCORSO",
+        help=(
+            "id dell'area (es. 'sub-ato-e', risolto sotto knowledge/) oppure "
+            "percorso a una cartella d'area contenente area.toml"
+        ),
+    )
+    p_sync.add_argument(
+        "--only",
+        choices=("all", "rag", "calendari"),
+        default="all",
+        help=(
+            "quale metà eseguire (default: all). 'calendari' salta il "
+            "caricamento del modello di embedding: usalo per correggere una "
+            "data senza ricalcolare gli embedding dell'intera area"
+        ),
+    )
+    p_sync.add_argument(
+        "--reset",
+        action="store_true",
+        help=(
+            "svuota la collection dell'area prima di riscriverla. Serve dopo "
+            "un cambio di strategia di chunking o quando si toglie una voce da "
+            "un Markdown: l'upsert aggiorna i chunk che ricalcola uguali ma non "
+            "cancella quelli che non produce più, e i vecchi restano a "
+            "competere nel retrieval"
+        ),
+    )
+    p_sync.add_argument(
+        "--model",
+        default=None,
+        help="modello di embedding (default: env EMBEDDING_MODEL, o quello del pacchetto)",
+    )
+    p_sync.set_defaults(func=_cmd_sync)
+
+    p_voc = sub.add_parser(
+        "extract-vocabolario",
+        help="PDF del riciclabolario -> un Markdown per lettera (BOZZA da rileggere)",
+    )
+    p_voc.add_argument(
+        "--pdf", required=True, help="percorso locale o URL http(s) del PDF"
+    )
+    p_voc.add_argument(
+        "--out",
+        required=True,
+        metavar="CARTELLA",
+        help="cartella di destinazione, tipicamente knowledge/<area_id>/guide",
+    )
+    p_voc.add_argument(
+        "--materiali-map",
+        dest="materiali_map",
+        default=None,
+        metavar="Voce=materiale,...",
+        help=(
+            "traduce i termini del riciclabolario nei materiali canonici "
+            "(carta, cartone, vetro, organico, plastica, metalli, "
+            "indifferenziato). Default: mappa TeknoService. Il vocabolario "
+            "registra materiali, non nomi di bidoni: quale bidone sia dipende "
+            "dal comune e dalla frazione, e la traduzione la fa il manifest"
+        ),
+    )
+    p_voc.set_defaults(func=_cmd_extract_vocabolario)
+
+    p_cal = sub.add_parser(
+        "extract-calendario",
+        help="immagine di un calendario -> Markdown (BOZZA da rileggere)",
+    )
+    p_cal.add_argument(
+        "--image", required=True, help="immagine della griglia del calendario"
+    )
+    p_cal.add_argument(
+        "--area",
+        default=None,
+        metavar="ID|PERCORSO",
+        help="area di destinazione, usata con --comuni/--frazioni",
+    )
+    p_cal.add_argument(
+        "--comuni",
+        default=None,
+        metavar="bard,donnas,hone",
+        help=(
+            "comuni a cui si applica questo calendario. Il file viene scritto "
+            "in _calendari/<comune>/ per ciascuno, da una sola estrazione: è "
+            "così che si evita di copiare le versioni a mano e dimenticarne una"
+        ),
+    )
+    p_cal.add_argument(
+        "--frazioni",
+        default=None,
+        metavar="donnas/albard,bard/crous",
+        help=(
+            "frazioni a cui si applica questo calendario, come coppie "
+            "comune/frazione. Scritto in _calendari/<comune>/_frazioni/<frazione>/"
+        ),
+    )
+    p_cal.add_argument(
+        "--periodo",
+        default="calendario",
+        metavar="2026_semestre_2",
+        help="nome del file, senza estensione (default: 'calendario')",
+    )
+    p_cal.add_argument(
+        "--out",
+        default=None,
+        metavar="FILE.md",
+        help="percorso esplicito di un singolo file, alternativo a --area/--comuni",
+    )
+    p_cal.add_argument(
+        "--model",
+        default=None,
+        help="modello multimodale (default: env INGEST_VISION_MODEL)",
+    )
+    p_cal.add_argument(
+        "--base-url",
+        dest="base_url",
+        default=None,
+        help="endpoint OpenAI-compatibile (default: env INGEST_VISION_BASE_URL)",
+    )
+    p_cal.set_defaults(func=_cmd_extract_calendario)
+
+    return parser
 
 
 def main() -> None:
-    """Entry point CLI:
-
-        uv run bordeus-ingest --sub-ato=sub-ato-e:"Sub-ATO E — Mont-Rose e Walser" \\
-            --gestore="TeknoService Italia" \\
-            --url=https://www.teknoserviceitalia.com/rifiuti \\
-            --comune=donnas:Donnas \\
-            --comune=bard:Bard \\
-            --comune-url=donnas:https://www.teknoserviceitalia.com/calendario-donnas.pdf
-
-    Un'area Sub-ATO (--sub-ato) può avere più fonti condivise (--url,
-    ripetibile — tipico: una pagina specifica dell'area + un contenuto
-    condiviso da tutte le aree dello stesso gestore, come un
-    vocabolario) e copre sempre uno o più comuni (--comune, ripetibile).
-    Se un comune ha contenuto specifico non condiviso con gli altri
-    comuni dell'area (tipicamente un calendario di raccolta), aggiungilo
-    con --comune-url=id:url (ripetibile, anche più volte per lo stesso
-    comune). Area e comuni vengono creati/aggiornati in Postgres
-    (upsert) prima dell'ingestion, poi l'area riceve la propria
-    collection isolata nel vector store — i chunk da --comune-url
-    restano nella stessa collection, solo taggati col comune.
-    """
     load_dotenv()
+    # LOG_LEVEL accetta anche TRACE (5): vedi bordeus_common.log.
+    setup_logging()
 
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    parser = argparse.ArgumentParser(description=main.__doc__)
-    parser.add_argument(
-        "--sub-ato",
-        dest="sub_ato",
-        required=True,
-        metavar="id:Nome",
-        help="area Sub-ATO da ingerire (es. 'sub-ato-e:Sub-ATO E — Mont-Rose e Walser')",
-    )
-    parser.add_argument(
-        "--gestore",
-        default="",
-        help="nome del gestore/consorzio dell'area (informativo, mostrato all'utente dal bot)",
-    )
-    parser.add_argument(
-        "--url",
-        dest="urls",
-        action="append",
-        required=True,
-        help="URL condiviso dall'area da cui ingerire (ripetibile: una pagina specifica + eventuale contenuto condiviso)",
-    )
-    parser.add_argument(
-        "--comune",
-        dest="comuni",
-        action="append",
-        type=_parse_comune_arg,
-        required=True,
-        metavar="id:Nome",
-        help="comune coperto da quest'area (ripetibile per più comuni)",
-    )
-    parser.add_argument(
-        "--comune-url",
-        dest="comune_urls",
-        action="append",
-        type=_parse_comune_url_arg,
-        default=[],
-        metavar="id:url",
-        help="URL specifico di UN comune, non condiviso dall'area (ripetibile — tipico: calendario di raccolta)",
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="modello sentence-transformers da usare (default: env EMBEDDING_MODEL, o il default del pacchetto)",
-    )
-    args = parser.parse_args()
-
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        print("DATABASE_URL non impostata", file=sys.stderr)
-        raise SystemExit(1)
-
-    sub_ato_id, sub_ato_nome = _parse_id_nome_arg("--sub-ato", args.sub_ato)
-
-    comune_urls: dict[str, list[str]] = {}
-    for comune_id, url in args.comune_urls:
-        comune_urls.setdefault(comune_id, []).append(url)
-
-    embeddings = get_embeddings(args.model)
-
-    run_sub_ato(
-        sub_ato_id,
-        sub_ato_nome,
-        args.gestore,
-        args.comuni,
-        args.urls,
-        database_url,
-        embeddings,
-        comune_urls=comune_urls,
-    )
+    args = build_parser().parse_args()
+    try:
+        args.func(args)
+    except manifest.ManifestError as exc:
+        # Errore di configurazione, non un bug: un traceback qui
+        # nasconderebbe il messaggio, che è già scritto per essere letto.
+        print(f"Manifest non valido: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":
